@@ -106,10 +106,10 @@ ResetBG:
 InitializeObjects:
   ld hl,   ShadowOAM   ; hl points to first object entry
 .init:
-  ld a,75
+  ld a,32
   ld [hl], a           ; set Y coordinate
   inc      hl
-  ld a,75
+  ld a,32
   ld [hl], a           ; set X coordinate
   inc      hl
   
@@ -117,9 +117,6 @@ InitializeObjects:
   ld [hl], a
   
   inc      hl
-  
-  ld a,0
-  ld [hl], a           ; 写入属性 = 0（无翻转，调色板 0，优先级正常）
   
   inc      hl
   ret
@@ -167,29 +164,150 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  
+  ld a,1             ;用于临时说明更改了X还是Y a=1:Y   a=0:X
+  call CheckMove
+  cp 1
+  jr nz,.next
+  
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  
   jr .next
+  
 .moveLeft
   inc hl
   dec [hl]
   dec [hl]
   dec [hl]
   dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  
+  ld a,0            
+  call CheckMove
+  cp 1
+  jr nz,.next
+  
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  
   jr .next
+  
 .moveUp
   dec [hl]
   dec [hl]
   dec [hl]
   dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  
+  ld a,1             
+  call CheckMove
+  cp 1
+  jr nz,.next
+  
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  
   jr .next
+  
 .moveRight
   inc hl
   inc [hl]
   inc [hl]
   inc [hl]
   inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  
+  ld a,0
+  call CheckMove
+  cp 1
+  jr nz,.next
+  
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  
+  jr .next
+  
 .next
   pop hl
   ret
+
+CheckMove:
+  cp 1
+  jr nz,.XCoordinate
+.YCoordinate     ;检测Y边界
+  ld a,[hl]      
+  
+  cp 144+12
+  jr nc,.WithdrawMove
+  
+  cp 16
+  jr c,.WithdrawMove
+  
+  jr .Boundarydetectioncompleted
+
+.XCoordinate     ;检测X边界
+  ld a,[hl]
+  
+  cp 160+4
+  jr nc,.WithdrawMove
+  
+  cp 8
+  jr c,.WithdrawMove
+  
+.Boundarydetectioncompleted    ;边界检测完成
+
+.RockDetection
+  
+  
+  
+  
+
+.IllegalMove
+  ld a,0
+  ret
+
+.WithdrawMove        ;撤回移动，a用于临时说明要不要撤回。1代表需要，0代表不用
+  ld a,1       
+  ret
+  
 
 Random2bits:
   push bc
