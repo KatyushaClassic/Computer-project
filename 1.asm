@@ -1,7 +1,18 @@
+; [改动 1] UpdateInputs: readKeys 后用 c（边沿），不用 b（按住）→ 每按一次方向键只走一格
+; [改动 2] CheckMove Y 上界 + 下列常量 → 底部 UI_ROWS 行留给 UI，笑脸不可进入
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
-DEF PLAYER_TILE_ID EQU 2 
+DEF PLAYER_TILE_ID EQU 2
+
+; [改动 2] 底部 2 行 UI 预留（见 PLAY_Y_MAX）
+DEF SCR_H       EQU 144
+DEF UI_ROWS     EQU 2
+DEF TILE_PX     EQU 8
+DEF SPRITE_PX   EQU 8
+DEF OAM_Y_BIAS  EQU 16
+DEF PLAY_Y_MAX  EQU SCR_H - (UI_ROWS * TILE_PX) - SPRITE_PX + OAM_Y_BIAS
+DEF PLAY_Y_MIN  EQU OAM_Y_BIAS
 
 CHARMAP " ", 7          ; 空格 → tile 7 (blank)
 CHARMAP "A", 19         ; A → tile 19
@@ -73,7 +84,7 @@ EntryPoint:
   call   ResetBG
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
-  
+
 
 MainLoop:
   call UpdateInputs
@@ -112,12 +123,12 @@ InitializeObjects:
   ld a,32
   ld [hl], a           ; set X coordinate
   inc      hl
-  
-  ld a,PLAYER_TILE_ID  ; ← tile ID = 6 (笑脸)
+
+  ld a,PLAYER_TILE_ID
   ld [hl], a
-  
+
   inc      hl
-  
+
   inc      hl
   ret
 
@@ -143,10 +154,10 @@ CopyShadowOAMtoOAM:
   ret
 
 UpdateInputs:
-  ld hl,ShadowOAM       ;人物素材坐标
+  ld hl,ShadowOAM       ; 人物素材坐标
   push hl
   call readKeys
-  ld a,b
+  ld a,c                ; [改动 1] 原版: ld a,b
   bit 5,a               ; 左键
   jr nz, .moveLeft
   bit 6,a               ; 上键
@@ -155,9 +166,9 @@ UpdateInputs:
   jr nz, .moveRight
   bit 7,a               ; 下键
   jr nz, .moveDown
-  
-  ;待添加：reset功能和换关功能
-  
+
+  ; 待添加：reset 功能和换关功能
+
   jr .next
 .moveDown
   inc [hl]
@@ -168,12 +179,12 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
-  
-  ld a,1             ;用于临时说明更改了X还是Y a=1:Y   a=0:X
+
+  ld a,1             ; a=1:Y   a=0:X
   call CheckMove
   cp 1
   jr nz,.next
-  
+
   dec [hl]
   dec [hl]
   dec [hl]
@@ -182,9 +193,9 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   dec [hl]
-  
+
   jr .next
-  
+
 .moveLeft
   inc hl
   dec [hl]
@@ -195,12 +206,12 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   dec [hl]
-  
-  ld a,0            
+
+  ld a,0
   call CheckMove
   cp 1
   jr nz,.next
-  
+
   inc [hl]
   inc [hl]
   inc [hl]
@@ -209,9 +220,9 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
-  
+
   jr .next
-  
+
 .moveUp
   dec [hl]
   dec [hl]
@@ -221,12 +232,12 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   dec [hl]
-  
-  ld a,1             
+
+  ld a,1
   call CheckMove
   cp 1
   jr nz,.next
-  
+
   inc [hl]
   inc [hl]
   inc [hl]
@@ -235,9 +246,9 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
-  
+
   jr .next
-  
+
 .moveRight
   inc hl
   inc [hl]
@@ -248,12 +259,12 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
-  
+
   ld a,0
   call CheckMove
   cp 1
   jr nz,.next
-  
+
   dec [hl]
   dec [hl]
   dec [hl]
@@ -262,9 +273,9 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   dec [hl]
-  
+
   jr .next
-  
+
 .next
   pop hl
   ret
@@ -272,68 +283,59 @@ UpdateInputs:
 CheckMove:
   cp 1
   jr nz,.XCoordinate
-.YCoordinate     ;检测Y边界
-  ld a,[hl]      
-  
-  cp 144+12
+.YCoordinate     ; 检测 Y 边界
+  ld a,[hl]
+
+  cp PLAY_Y_MAX + 1       ; [改动 2] 原版: cp 144+12
   jr nc,.WithdrawMove
-  
-  cp 16
+
+  cp PLAY_Y_MIN
   jr c,.WithdrawMove
-  
+
   jr .Boundarydetectioncompleted
 
-.XCoordinate     ;检测X边界
+.XCoordinate     ; 检测 X 边界
   ld a,[hl]
-  
+
   cp 160+4
   jr nc,.WithdrawMove
-  
+
   cp 8
   jr c,.WithdrawMove
-  
-.Boundarydetectioncompleted    ;边界检测完成
+
+.Boundarydetectioncompleted
 
 .RockDetection
-  
-  
-  
-  
+
+
 
 .IllegalMove
   ld a,0
   ret
 
-.WithdrawMove        ;撤回移动，a用于临时说明要不要撤回。1代表需要，0代表不用
-  ld a,1       
+.WithdrawMove
+  ld a,1
   ret
-  
+
 
 Random2bits:
   push bc
-  call RandomByte; ld a,[rDiv] (16cy) ::  xor b (4cy) :: xor l (4cy) :: xor [hl] (8cy) (=32cy) , vs call/ret (24cy+16= 40cy)
+  call RandomByte
   ld b,a
 
-  swap a         ; Swap nibbles
-  xor b          ; XOR high and low nibbles
+  swap a
+  xor b
   ld b,a
   rrca
-  rrca           ; Shift right 2
-  xor b          ; Mix more
+  rrca
+  xor b
 
-  and %00000011  ; Keep 2 bits
+  and %00000011
   pop bc
   ret
-  
-; Alternatively (if you only keep the 2 low bits):
-; REPT 3
-;   rrca :: rrca :: xor b
-; ENDR
 
 
 RandomByte:
-; Return a "random" byte into A
-; by mixing a few values with XOR
   ld a,[rDIV]
   xor b
   xor l
@@ -347,7 +349,6 @@ WaitVBlank:
   ret
 
 ResetOAM:
-; input: HL: location of OAM or Shadow OAM
   ld b,40*4
   ld a,0
 .loop:
@@ -374,40 +375,32 @@ CopyTilesToVRAM:
   jr nz, .copy
   ret
 
-;---------------------------------------------------------------------
 readKeys:
-;---------------------------------------------------------------------
-; Output:
-; b : raw state:   pressing key triggers given action continuously
-;                  as long as it is pressed
-; c : rising edge: pressing key triggers given action only once,
-;                  key must be released and pressed again
-; Requires to define variables `previous` and `current`
   ld    a,$20
-  ldh   [rP1],a   
+  ldh   [rP1],a
   ldh   a,[rP1] :: ldh a,[rP1]
   cpl
-  and   $0F         ; lower nibble has down, up, left, right
-  swap	a           ; becomes high nibble
-  ld	b,a
+  and   $0F
+  swap  a
+  ld    b,a
   ld    a,$10
   ldh   [rP1],a
   ldh   a,[rP1] :: ldh a,[rP1] :: ldh a,[rP1]
   ldh   a,[rP1] :: ldh a,[rP1] :: ldh a,[rP1]
   cpl
-  and   $0F         ; lower nibble has start, select, B, A
+  and   $0F
   or    b
   ld    b,a
 
-  ld    a,[previous]  ; load previous state
-  xor   b	      ; result will be 0 if it's the same as current read
-  and   b	      ; keep buttons that were pressed during this read only
-  ld    [current],a   ; store result in "current" variable and c register
+  ld    a,[previous]
+  xor   b
+  and   b
+  ld    [current],a
   ld    c,a
-  ld    a,b           ; current state will be previous in next read
+  ld    a,b
   ld    [previous],a
 
-  ld    a,$30         ; reset rP1
+  ld    a,$30
   ldh   [rP1],a
   ret
 
@@ -419,10 +412,24 @@ PressStr:
 
 Tiles:
 ;0 = Dirt
- DB 0,0,0,0,0,0,0,0
+  DB %11111111
+  DB %10100101
+  DB %11011011
+  DB %10000001
+  DB %11011011
+  DB %10100101
+  DB %11111111
+  DB %01011010
 
 ;1 = Rock
- DB 0,0,0,0,0,0,0,0
+  DB %00111100
+  DB %01111110
+  DB %11111111
+  DB %11100111
+  DB %11000011
+  DB %11100111
+  DB %01111110
+  DB %00111100
 
 ;2 = NPC(smiling face)
  DB %01111110
@@ -433,19 +440,40 @@ Tiles:
  DB %10011001
  DB %10000001
  DB %01111110
- 
+
 ;3 = Money
- DB 0,0,0,0,0,0,0,0
- 
+  DB %00011000
+  DB %00111100
+  DB %01111110
+  DB %11111111
+  DB %11111111
+  DB %01111110
+  DB %00111100
+  DB %00011000
+
 ;4 = Solid wall
- DB 0,0,0,0,0,0,0,0
- 
+  DB %11111111
+  DB %10000001
+  DB %10111101
+  DB %10100101
+  DB %10111101
+  DB %10000001
+  DB %11111111
+  DB %11111111
+
 ;5 = Empty space
- DB 0,0,0,0,0,0,0,0
- 
+  DB %00000000
+  DB %00000000
+  DB %00000000
+  DB %00000000
+  DB %00000000
+  DB %00000000
+  DB %00000000
+  DB %00000000
+
 ;6 = Player start
  DB 0,0,0,0,0,0,0,0
- 
+
 ; blank
 DB 0,0,0,0,0,0,0,0
 DB 0,0,0,0,0,0,0,0
@@ -491,6 +519,6 @@ DB 0,0,0,0,0,0,0,0
 TilesEnd:
 
 SECTION "Variables", WRAM0
-ShadowOAM: DS 160 
+ShadowOAM: DS 160
 current: DS 1
 previous: DS 1
