@@ -14,6 +14,19 @@ DEF OAM_Y_BIAS  EQU 16
 DEF PLAY_Y_MAX  EQU SCR_H - (UI_ROWS * TILE_PX) - SPRITE_PX + OAM_Y_BIAS
 DEF PLAY_Y_MIN  EQU OAM_Y_BIAS
 
+DEF LEVEL_W     EQU 32
+DEF LEVEL_H     EQU 18
+DEF LEVEL_SIZE  EQU LEVEL_W * LEVEL_H
+
+DEF TILE_DIRT   EQU 0
+DEF TILE_ROCK   EQU 1
+DEF TILE_MONEY  EQU 3
+DEF TILE_WALL   EQU 4
+DEF TILE_EMPTY  EQU 5
+DEF TILE_START  EQU 6
+DEF TILE_UI     EQU 7
+DEF PLAY_ROWS   EQU LEVEL_H - UI_ROWS
+
 CHARMAP " ", 7          ; 空格 → tile 7 (blank)
 CHARMAP "A", 19         ; A → tile 19
 CHARMAP "B", 20
@@ -54,6 +67,8 @@ EntryPoint:
 
   ld a,%11111100 ; black and white palette
   ld [rOBP0], a
+  ld a,%11100100 ; 背景四色对比，否则墙/石/土在绿屏上看不见
+  ld [rBGP], a
 
   call   CopyTilesToVRAM
   ld     hl, STARTOF(OAM)
@@ -81,7 +96,7 @@ EntryPoint:
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
-  call   ResetBG
+  call   LoadLevel
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
@@ -281,42 +296,137 @@ UpdateInputs:
   ret
 
 CheckMove:
+  push hl             ; 保护 OAM 指针，供移动撤销 dec [hl] 使用
   cp 1
   jr nz,.XCoordinate
-.YCoordinate     ; 检测 Y 边界
+.YCoordinate
   ld a,[hl]
-
-  cp PLAY_Y_MAX + 1       ; [改动 2] 原版: cp 144+12
+  cp PLAY_Y_MAX + 1
   jr nc,.WithdrawMove
-
   cp PLAY_Y_MIN
   jr c,.WithdrawMove
-
   jr .Boundarydetectioncompleted
 
-.XCoordinate     ; 检测 X 边界
+.XCoordinate
   ld a,[hl]
-
   cp 160+4
   jr nc,.WithdrawMove
-
   cp 8
   jr c,.WithdrawMove
 
 .Boundarydetectioncompleted
+  push bc
+  ld de, ShadowOAM
+  ld a, [de]
+  sub OAM_Y_BIAS
+  srl a
+  srl a
+  srl a
+  ld b, a
 
-.RockDetection
+  ld a, b
+  cp PLAY_ROWS
+  jr nc, .TileBlockedUI
 
+  inc de
+  ld a, [de]
+  sub 8
+  srl a
+  srl a
+  srl a
+  ld c, a
 
+  ld a, b
+  ld l, a
+  ld h, 0
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  ld a, c
+  ld e, a
+  ld d, 0
+  add hl, de
+  ld bc, TILEMAP0
+  add hl, bc
+  ld a, [hl]
+  pop bc
 
-.IllegalMove
-  ld a,0
+  cp TILE_EMPTY
+  jr z, .MoveAllowed
+  cp TILE_START
+  jr z, .MoveAllowed
+  jr .TileBlocked
+
+.MoveAllowed
+  pop hl
+  ld a, 0
+  ret
+
+.TileBlockedUI
+  pop bc
+  jr .TileBlocked
+
+.TileBlocked
+  pop hl
+  ld a, 1
   ret
 
 .WithdrawMove
-  ld a,1
+  pop hl
+  ld a, 1
   ret
 
+LoadLevel:
+  ld hl, Level1Map
+  ld de, TILEMAP0
+  xor a
+  ld b, a
+.row:
+  xor a
+  ld c, a
+.col:
+  ld a, [hl+]
+  cp TILE_START
+  jr nz, .writeTile
+  push bc
+  ld a, c
+  add a
+  add a
+  add a
+  add 8
+  ld [ShadowOAM + 1], a
+  ld a, b
+  add a
+  add a
+  add a
+  add OAM_Y_BIAS
+  ld [ShadowOAM], a
+  pop bc
+  ld a, TILE_EMPTY
+.writeTile:
+  ld [de], a
+  inc de
+  inc c
+  ld a, c
+  cp LEVEL_W
+  jr nz, .col
+  inc b
+  ld a, b
+  cp LEVEL_H
+  jr nz, .row
+
+  ld hl, TILEMAP0 + LEVEL_SIZE
+  ld bc, 1024 - LEVEL_SIZE
+.fillRest:
+  ld a, TILE_EMPTY
+  ld [hl+], a
+  dec bc
+  ld a, b
+  or c
+  jr nz, .fillRest
+  ret
 
 Random2bits:
   push bc
@@ -408,6 +518,27 @@ SECTION "Data", ROM0
 PressStr:
   DB "PRESS ANY KEY"
 .end
+
+
+Level1Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,1,1,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,0,0,0,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,3,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 
 Tiles:
