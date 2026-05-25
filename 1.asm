@@ -105,7 +105,7 @@ ResetBG:
   ld hl,TILEMAP0
   ld bc,1024
 .loop:
-  ld [hl],1 ; blank
+  ld [hl],5 ; blank
   inc hl
   dec bc
   ld a,b
