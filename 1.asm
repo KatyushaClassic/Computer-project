@@ -1,11 +1,11 @@
-; [改动 1] UpdateInputs: readKeys 后用 c（边沿），不用 b（按住）→ 每按一次方向键只走一格
-; [改动 2] CheckMove Y 上界 + 下列常量 → 底部 UI_ROWS 行留给 UI，笑脸不可进入
+; [Change 1] UpdateInputs: use c (edge) after readKeys, not b (held) → one step per direction press
+; [Change 2] CheckMove Y upper bound + constants below → bottom UI_ROWS rows reserved for UI, player cannot enter
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
 DEF PLAYER_TILE_ID EQU 2
 
-; [改动 2] 底部 2 行 UI 预留（见 PLAY_Y_MAX）
+; [Change 2] Reserve bottom 2 rows for UI (see PLAY_Y_MAX)
 DEF SCR_H       EQU 144
 DEF UI_ROWS     EQU 2
 DEF TILE_PX     EQU 8
@@ -27,7 +27,7 @@ DEF TILE_START  EQU 6
 DEF TILE_UI     EQU 7
 DEF PLAY_ROWS   EQU LEVEL_H - UI_ROWS
 
-CHARMAP " ", 7          ; 空格 → tile 7 (blank)
+CHARMAP " ", 7          ; space → tile 7 (blank)
 CHARMAP "A", 19         ; A → tile 19
 CHARMAP "B", 20
 CHARMAP "C", 21
@@ -67,7 +67,7 @@ EntryPoint:
 
   ld a,%11111100 ; black and white palette
   ld [rOBP0], a
-  ld a,%11100100 ; 背景四色对比，否则墙/石/土在绿屏上看不见
+  ld a,%11100100 ; four background shades, otherwise wall/rock/dirt invisible on green screen
   ld [rBGP], a
 
   call   CopyTilesToVRAM
@@ -102,8 +102,10 @@ EntryPoint:
 
 
 MainLoop:
-  call UpdateInputs
+
+  call RockCheck
   call WaitVBlank
+  call UpdateInputs
   call CopyShadowOAMtoOAM
   jp MainLoop
 
@@ -120,7 +122,7 @@ ResetBG:
   ld hl,TILEMAP0
   ld bc,1024
 .loop:
-  ld [hl],5 ; tile 5 = 空地（黑底）
+  ld [hl],5 ; tile 5 = empty (black background)
   inc hl
   dec bc
   ld a,b
@@ -169,20 +171,20 @@ CopyShadowOAMtoOAM:
   ret
 
 UpdateInputs:
-  ld hl,ShadowOAM       ; 人物素材坐标
+  ld hl,ShadowOAM       ; player sprite coordinates
   push hl
   call readKeys
-  ld a,c                ; [改动 1] 原版: ld a,b
-  bit 5,a               ; 左键
+  ld a,c                ; [Change 1] originally: ld a,b
+  bit 5,a               ; left
   jr nz, .moveLeft
-  bit 6,a               ; 上键
+  bit 6,a               ; up
   jr nz, .moveUp
-  bit 4,a               ; 右键
+  bit 4,a               ; right
   jr nz, .moveRight
-  bit 7,a               ; 下键
+  bit 7,a               ; down
   jr nz, .moveDown
 
-  ; 待添加：reset 功能和换关功能
+  ; TODO: add reset and level change functions
 
   jr .next
 .moveDown
@@ -195,7 +197,7 @@ UpdateInputs:
   inc [hl]
   inc [hl]
 
-  ld a,1             ; a=1:Y   a=0:X
+  ld a,1             ; a=1: Y   a=0: X
   call CheckMove
   cp 1
   jr nz,.next
@@ -296,7 +298,7 @@ UpdateInputs:
   ret
 
 CheckMove:
-  push hl             ; 保护 OAM 指针，供移动撤销 dec [hl] 使用
+  push hl             ; save OAM pointer for move undo (dec [hl])
   cp 1
   jr nz,.XCoordinate
 .YCoordinate
@@ -355,23 +357,24 @@ CheckMove:
 
   cp TILE_EMPTY
   jr z, .MoveAllowed
+
   cp TILE_START
   jr z, .MoveAllowed
   cp TILE_MONEY
-  ;待添加：金币计数器
+  ; TODO: add coin counter
   jr z, .MoveAllowedAndChangeBG
   cp TILE_DIRT
   jr z, .MoveAllowedAndChangeBG
-  
+
   jr .TileBlocked
- 
+
 
 .MoveAllowed
   pop hl
   ld a, 0
   ret
-  
-.MoveAllowedAndChangeBG    ;改成空
+
+.MoveAllowedAndChangeBG    ; change to empty
   ld a, TILE_EMPTY
   ld [hl],a
   pop hl
@@ -391,6 +394,130 @@ CheckMove:
   pop hl
   ld a, 1
   ret
+
+RockCheck:
+.SearchForRock
+  ld hl, TILEMAP0 + 1024 - 1  ; hl = last tile (bottom-right, highest address)
+  ld bc, 1024
+
+.SearchRockLoop
+  ld a, [hl]                   ; read current tile id
+  cp TILE_ROCK
+  jr nz, .skip
+
+  ; rock found
+.MoveRock
+  ld   d,h          ; hl = original address
+  ld   e,l
+  ld   a, l
+  add  LEVEL_W         ; add 32
+  ld   l, a
+  ld   a, h
+  adc  0               ; handle carry
+  ld   h, a            ; hl now points to the tile directly below
+
+  call CheckRockMove
+  cp 1
+  jr z,.CheckMoveRight
+
+  ; set original rock tile to empty (movement allowed)
+  ld h,d
+  ld l,e
+  ld a,TILE_EMPTY
+  ld [hl],a
+  jr .RockSkip
+
+.CheckMoveRight  ; try moving to lower-left (ambiguous order, no need to check player death yet)
+
+  dec hl         ; hl is already one row down, now one column left
+
+  call CheckRockMove
+  cp 1
+  jr z,.CheckMoveLeft
+
+  ; set original rock tile to empty (movement allowed)
+  ld h,d
+  ld l,e
+  ld a,TILE_EMPTY
+  ld [hl],a
+  jr .RockSkip
+
+.CheckMoveLeft
+
+  inc hl
+  inc hl
+
+  call CheckRockMove
+  cp 1
+  jr z,.RockSkip
+
+  ; set original rock tile to empty (movement allowed)
+  ld h,d
+  ld l,e
+  ld a,TILE_EMPTY
+  ld [hl],a
+  jr .skip
+
+.RockSkip
+  ld h,d
+  ld l,e
+
+.skip
+  dec hl                       ; address -1 → move left one tile (to end of previous row)
+  dec bc
+  ld a, b
+  or c
+  jp nz, .SearchRockLoop
+  ret
+
+CheckRockMove:        ; returns 0 if movable, 1 if not
+.CheckRockMoveStart
+  push de             ; save OAM pointer for move undo (dec [hl])
+  push hl
+
+
+.Boundarydetectioncompleted
+  ; check what tile is there, continue if empty
+
+  ld a,[hl]
+  cp TILE_ROCK
+  jr z, .Skip
+  cp TILE_DIRT
+  jr z, .Skip
+  cp TILE_MONEY
+  jr z, .Skip
+  cp TILE_WALL
+  jr z, .Skip
+
+  cp PLAYER_TILE_ID
+  jr z, .Die
+
+  cp TILE_EMPTY
+  jr z, .MoveAllowedAndChangeBG
+
+  jr .Skip
+
+.MoveAllowedAndChangeBG    ; change to rock
+  ld a, TILE_ROCK
+  ld [hl],a
+  pop hl
+  pop de
+  ld a, 0
+  ret
+
+
+.Skip
+  pop hl
+  pop de
+  ld a, 1
+  ret
+
+.Die
+  pop hl
+  pop de
+  ld a, 1   ; TODO: handle player death
+  ret
+
 
 LoadLevel:
   ld hl, Level1Map
@@ -537,9 +664,9 @@ PressStr:
 Level1Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,1,1,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,0,0,0,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,3,3,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
