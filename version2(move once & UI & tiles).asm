@@ -30,8 +30,20 @@ DEF TILE_EMPTY  EQU 5
 DEF TILE_START  EQU 6
 DEF TILE_UI     EQU 7
 DEF PLAY_ROWS   EQU LEVEL_H - UI_ROWS
+DEF UI_TEXT_ROW EQU LEVEL_H - 1
+DEF PRIZE_DIGIT_COL EQU 10
 
 CHARMAP " ", 7          ; 空格 → tile 7 (blank)
+CHARMAP "0", 9
+CHARMAP "1", 10
+CHARMAP "2", 11
+CHARMAP "3", 12
+CHARMAP "4", 13
+CHARMAP "5", 14
+CHARMAP "6", 15
+CHARMAP "7", 16
+CHARMAP "8", 17
+CHARMAP "9", 18
 CHARMAP "A", 19         ; A → tile 19
 CHARMAP "B", 20
 CHARMAP "C", 21
@@ -178,13 +190,13 @@ UpdateInputs:
   call readKeys
   ld a,c                ; [改动 1] 原版: ld a,b
   bit 5,a               ; 左键
-  jr nz, .moveLeft
+  jp nz, .moveLeft
   bit 6,a               ; 上键
-  jr nz, .moveUp
+  jp nz, .moveUp
   bit 4,a               ; 右键
-  jr nz, .moveRight
+  jp nz, .moveRight
   bit 7,a               ; 下键
-  jr nz, .moveDown
+  jp nz, .moveDown
 
   ; 待添加：reset 功能和换关功能
 
@@ -202,11 +214,15 @@ UpdateInputs:
   ld a,1             ; a=1:Y   a=0:X
   call CheckMove
   cp 1
-  jr nz,.next
+  jr z,.blocked
 
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blocked:
   call DigIfDirtAtPlayerTile
   cp 0
-  jr z,.next
+  jp z,.next
 
   dec [hl]
   dec [hl]
@@ -216,8 +232,7 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   dec [hl]
-
-  jr .next
+  jp .next
 
 .moveLeft
   inc hl
@@ -233,11 +248,15 @@ UpdateInputs:
   ld a,0
   call CheckMove
   cp 1
-  jr nz,.next
+  jr z,.blockedLeft
 
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blockedLeft:
   call DigIfDirtAtPlayerTile
   cp 0
-  jr z,.next
+  jp z,.next
 
   inc [hl]
   inc [hl]
@@ -247,8 +266,7 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
-
-  jr .next
+  jp .next
 
 .moveUp
   dec [hl]
@@ -263,11 +281,15 @@ UpdateInputs:
   ld a,1
   call CheckMove
   cp 1
-  jr nz,.next
+  jr z,.blockedUp
 
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blockedUp:
   call DigIfDirtAtPlayerTile
   cp 0
-  jr z,.next
+  jp z,.next
 
   inc [hl]
   inc [hl]
@@ -277,8 +299,7 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
-
-  jr .next
+  jp .next
 
 .moveRight
   inc hl
@@ -294,11 +315,15 @@ UpdateInputs:
   ld a,0
   call CheckMove
   cp 1
-  jr nz,.next
+  jr z,.blockedRight
 
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blockedRight:
   call DigIfDirtAtPlayerTile
   cp 0
-  jr z,.next
+  jp z,.next
 
   dec [hl]
   dec [hl]
@@ -308,8 +333,7 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   dec [hl]
-
-  jr .next
+  jp .next
 
 .next
   pop hl
@@ -370,6 +394,31 @@ DigIfDirtAtPlayerTile:
   jr .done
 .fail
   ld a,1
+.done
+  pop bc
+  pop hl
+  ret
+
+; 站在金币格：清空背景格、prizeLeft--、刷新底部数字
+TryCollectMoneyAtPlayerTile:
+  push hl
+  push bc
+  call GetPlayerTilePos
+  ld a, b
+  cp PLAY_ROWS
+  jr nc, .done
+  call GetTilemapPtrBC
+  ld a, [hl]
+  cp TILE_MONEY
+  jr nz, .done
+  ld a, TILE_EMPTY
+  ld [hl], a
+  ld a, [prizeLeft]
+  and a
+  jr z, .done
+  dec a
+  ld [prizeLeft], a
+  call UpdatePrizeDigit
 .done
   pop bc
   pop hl
@@ -437,6 +486,8 @@ CheckMove:
   jr z, .MoveAllowed
   cp TILE_START
   jr z, .MoveAllowed
+  cp TILE_MONEY
+  jr z, .MoveAllowed
   jr .TileBlocked
 
 .MoveAllowed
@@ -458,7 +509,50 @@ CheckMove:
   ld a, 1
   ret
 
+CountMoneyInLevel:
+  ld hl, Level1Map
+  ld bc, LEVEL_SIZE
+  ld d, 0
+.loop:
+  ld a, [hl+]
+  cp TILE_MONEY
+  jr nz, .skip
+  inc d
+.skip
+  dec bc
+  ld a, b
+  or c
+  jr nz, .loop
+  ld a, d
+  ld [prizeLeft], a
+  ret
+
+UpdatePrizeDigit:
+  ld a, [prizeLeft]
+  add a, 9
+  ld hl, TILEMAP0
+  ld bc, UI_TEXT_ROW * MAP_STRIDE + PRIZE_DIGIT_COL
+  add hl, bc
+  ld [hl], a
+  ret
+
+DrawPrizeUI:
+  ld hl, TILEMAP0
+  ld bc, UI_TEXT_ROW * MAP_STRIDE
+  add hl, bc
+  ld de, PrizeUiLine
+  ld b, PrizeUiLine.end - PrizeUiLine
+.copy:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .copy
+  call UpdatePrizeDigit
+  ret
+
 LoadLevel:
+  call CountMoneyInLevel
   ld hl, Level1Map
   ld de, TILEMAP0
   xor a
@@ -511,6 +605,7 @@ LoadLevel:
   ld a, b
   or c
   jr nz, .fillRest
+  call DrawPrizeUI
   ret
 
 Random2bits:
@@ -602,6 +697,10 @@ readKeys:
 SECTION "Data", ROM0
 PressStr:
   DB "PRESS ANY KEY"
+.end
+
+PrizeUiLine:
+  DB "PRIZELEFT "
 .end
 
 
@@ -748,3 +847,4 @@ SECTION "Variables", WRAM0
 ShadowOAM: DS 160
 current: DS 1
 previous: DS 1
+prizeLeft: DS 1
