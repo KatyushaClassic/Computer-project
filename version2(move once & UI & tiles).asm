@@ -14,9 +14,13 @@ DEF OAM_Y_BIAS  EQU 16
 DEF PLAY_Y_MAX  EQU SCR_H - (UI_ROWS * TILE_PX) - SPRITE_PX + OAM_Y_BIAS
 DEF PLAY_Y_MIN  EQU OAM_Y_BIAS
 
-DEF LEVEL_W     EQU 32
+; 可见 20 列 × 16 行游玩区，底部 2 行 UI（LEVEL_H - UI_ROWS）
+DEF LEVEL_W     EQU 20
 DEF LEVEL_H     EQU 18
+DEF MAP_STRIDE  EQU 32          ; GB 背景 tilemap 每行 32 格（VRAM 行宽，关卡数据仍 20 列）
 DEF LEVEL_SIZE  EQU LEVEL_W * LEVEL_H
+DEF PLAY_X_MIN  EQU 8
+DEF PLAY_X_MAX  EQU 8 + (LEVEL_W * TILE_PX)
 
 DEF TILE_DIRT   EQU 0
 DEF TILE_ROCK   EQU 1
@@ -184,7 +188,7 @@ UpdateInputs:
 
   ; 待添加：reset 功能和换关功能
 
-  jr .next
+  jp .next
 .moveDown
   inc [hl]
   inc [hl]
@@ -199,6 +203,10 @@ UpdateInputs:
   call CheckMove
   cp 1
   jr nz,.next
+
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jr z,.next
 
   dec [hl]
   dec [hl]
@@ -227,6 +235,10 @@ UpdateInputs:
   cp 1
   jr nz,.next
 
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jr z,.next
+
   inc [hl]
   inc [hl]
   inc [hl]
@@ -252,6 +264,10 @@ UpdateInputs:
   call CheckMove
   cp 1
   jr nz,.next
+
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jr z,.next
 
   inc [hl]
   inc [hl]
@@ -280,6 +296,10 @@ UpdateInputs:
   cp 1
   jr nz,.next
 
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jr z,.next
+
   dec [hl]
   dec [hl]
   dec [hl]
@@ -292,6 +312,66 @@ UpdateInputs:
   jr .next
 
 .next
+  pop hl
+  ret
+
+; 输出 b=行 c=列（玩家脚下格）
+GetPlayerTilePos:
+  ld a,[ShadowOAM]
+  sub OAM_Y_BIAS
+  srl a
+  srl a
+  srl a
+  ld b,a
+  ld a,[ShadowOAM + 1]
+  sub 8
+  srl a
+  srl a
+  srl a
+  ld c,a
+  ret
+
+; 输入 b=行 c=列，输出 hl -> TILEMAP0 对应格
+GetTilemapPtrBC:
+  ld a,b
+  ld l,a
+  ld h,0
+  add hl,hl
+  add hl,hl
+  add hl,hl
+  add hl,hl
+  add hl,hl
+  ld a,c
+  ld e,a
+  ld d,0
+  add hl,de
+  ld de,TILEMAP0
+  add hl,de
+  ret
+
+; 玩家 OAM 已在目标格时：若是土则挖掉并留在该格（a=0），否则 a=1
+DigIfDirtAtPlayerTile:
+  push hl
+  push bc
+  call GetPlayerTilePos
+  ld a,b
+  cp PLAY_ROWS
+  jr nc,.fail
+  ld a,c
+  cp LEVEL_W
+  jr nc,.fail
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_DIRT
+  jr nz,.fail
+  ld a,TILE_EMPTY
+  ld [hl],a
+  ld a,0
+  jr .done
+.fail
+  ld a,1
+.done
+  pop bc
   pop hl
   ret
 
@@ -309,9 +389,9 @@ CheckMove:
 
 .XCoordinate
   ld a,[hl]
-  cp 160+4
+  cp PLAY_X_MAX
   jr nc,.WithdrawMove
-  cp 8
+  cp PLAY_X_MIN
   jr c,.WithdrawMove
 
 .Boundarydetectioncompleted
@@ -412,16 +492,21 @@ LoadLevel:
   ld a, c
   cp LEVEL_W
   jr nz, .col
+  ld a, MAP_STRIDE - LEVEL_W
+.pad:
+  inc de
+  dec a
+  jr nz, .pad
   inc b
   ld a, b
   cp LEVEL_H
   jr nz, .row
 
-  ld hl, TILEMAP0 + LEVEL_SIZE
-  ld bc, 1024 - LEVEL_SIZE
+  ld bc, 1024 - (LEVEL_H * MAP_STRIDE)
 .fillRest:
   ld a, TILE_EMPTY
-  ld [hl+], a
+  ld [de], a
+  inc de
   dec bc
   ld a, b
   or c
@@ -520,25 +605,27 @@ PressStr:
 .end
 
 
+; 关卡 20 列满宽（无左右墙列）；竖垛列 4/8/12/16：dirt→rock→money→wall
+; 行 0/15 顶底墙；行 16–17 UI
 Level1Map:
-  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,1,1,1,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,0,0,0,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,3,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,0,5,5,5,0,5,5,5,0,5,5,5,0,5,5,5
+  DB 5,5,5,5,1,5,5,5,1,5,5,5,1,5,5,5,1,5,5,5
+  DB 5,5,5,5,3,5,5,5,3,5,5,5,3,5,5,5,3,5,5,5
+  DB 5,5,5,5,4,5,5,5,4,5,5,5,4,5,5,5,4,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 
 Tiles:
