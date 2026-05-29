@@ -1,11 +1,11 @@
-; [Change 1] UpdateInputs: use c (edge) after readKeys, not b (held) → one step per direction press
-; [Change 2] CheckMove Y upper bound + constants below → bottom UI_ROWS rows reserved for UI, player cannot enter
+; [改动 1] UpdateInputs: readKeys 后用 c（边沿），不用 b（按住）→ 每按一次方向键只走一格
+; [改动 2] CheckMove Y 上界 + 下列常量 → 底部 UI_ROWS 行留给 UI，笑脸不可进入
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
 DEF PLAYER_TILE_ID EQU 2
 
-; [Change 2] Reserve bottom 2 rows for UI (see PLAY_Y_MAX)
+; [改动 2] 底部 2 行 UI 预留（见 PLAY_Y_MAX）
 DEF SCR_H       EQU 144
 DEF UI_ROWS     EQU 2
 DEF TILE_PX     EQU 8
@@ -14,9 +14,13 @@ DEF OAM_Y_BIAS  EQU 16
 DEF PLAY_Y_MAX  EQU SCR_H - (UI_ROWS * TILE_PX) - SPRITE_PX + OAM_Y_BIAS
 DEF PLAY_Y_MIN  EQU OAM_Y_BIAS
 
-DEF LEVEL_W     EQU 32
+; 可见 20 列 × 16 行游玩区，底部 2 行 UI（LEVEL_H - UI_ROWS）
+DEF LEVEL_W     EQU 20
 DEF LEVEL_H     EQU 18
+DEF MAP_STRIDE  EQU 32          ; GB 背景 tilemap 每行 32 格（VRAM 行宽，关卡数据仍 20 列）
 DEF LEVEL_SIZE  EQU LEVEL_W * LEVEL_H
+DEF PLAY_X_MIN  EQU 8
+DEF PLAY_X_MAX  EQU 8 + (LEVEL_W * TILE_PX)
 
 DEF TILE_DIRT   EQU 0
 DEF TILE_ROCK   EQU 1
@@ -26,8 +30,20 @@ DEF TILE_EMPTY  EQU 5
 DEF TILE_START  EQU 6
 DEF TILE_UI     EQU 7
 DEF PLAY_ROWS   EQU LEVEL_H - UI_ROWS
+DEF UI_TEXT_ROW EQU LEVEL_H - 1
+DEF PRIZE_DIGIT_COL EQU 10
 
-CHARMAP " ", 7          ; space → tile 7 (blank)
+CHARMAP " ", 7          ; 空格 → tile 7 (blank)
+CHARMAP "0", 9
+CHARMAP "1", 10
+CHARMAP "2", 11
+CHARMAP "3", 12
+CHARMAP "4", 13
+CHARMAP "5", 14
+CHARMAP "6", 15
+CHARMAP "7", 16
+CHARMAP "8", 17
+CHARMAP "9", 18
 CHARMAP "A", 19         ; A → tile 19
 CHARMAP "B", 20
 CHARMAP "C", 21
@@ -67,7 +83,7 @@ EntryPoint:
 
   ld a,%11111100 ; black and white palette
   ld [rOBP0], a
-  ld a,%11100100 ; four background shades, otherwise wall/rock/dirt invisible on green screen
+  ld a,%11100100 ; 背景四色对比，否则墙/石/土在绿屏上看不见
   ld [rBGP], a
 
   call   CopyTilesToVRAM
@@ -102,10 +118,8 @@ EntryPoint:
 
 
 MainLoop:
-
-  call RockCheck
-  call WaitVBlank
   call UpdateInputs
+  call WaitVBlank
   call CopyShadowOAMtoOAM
   jp MainLoop
 
@@ -122,7 +136,7 @@ ResetBG:
   ld hl,TILEMAP0
   ld bc,1024
 .loop:
-  ld [hl],5 ; tile 5 = empty (black background)
+  ld [hl],5 ; tile 5 = 空地（黑底）
   inc hl
   dec bc
   ld a,b
@@ -171,22 +185,22 @@ CopyShadowOAMtoOAM:
   ret
 
 UpdateInputs:
-  ld hl,ShadowOAM       ; player sprite coordinates
+  ld hl,ShadowOAM       ; 人物素材坐标
   push hl
   call readKeys
-  ld a,c                ; [Change 1] originally: ld a,b
-  bit 5,a               ; left
-  jr nz, .moveLeft
-  bit 6,a               ; up
-  jr nz, .moveUp
-  bit 4,a               ; right
-  jr nz, .moveRight
-  bit 7,a               ; down
-  jr nz, .moveDown
+  ld a,c                ; [改动 1] 原版: ld a,b
+  bit 5,a               ; 左键
+  jp nz, .moveLeft
+  bit 6,a               ; 上键
+  jp nz, .moveUp
+  bit 4,a               ; 右键
+  jp nz, .moveRight
+  bit 7,a               ; 下键
+  jp nz, .moveDown
 
-  ; TODO: add reset and level change functions
+  ; 待添加：reset 功能和换关功能
 
-  jr .next
+  jp .next
 .moveDown
   inc [hl]
   inc [hl]
@@ -197,10 +211,18 @@ UpdateInputs:
   inc [hl]
   inc [hl]
 
-  ld a,1             ; a=1: Y   a=0: X
+  ld a,1             ; a=1:Y   a=0:X
   call CheckMove
   cp 1
-  jr nz,.next
+  jr z,.blocked
+
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blocked:
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jp z,.next
 
   dec [hl]
   dec [hl]
@@ -210,8 +232,7 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   dec [hl]
-
-  jr .next
+  jp .next
 
 .moveLeft
   inc hl
@@ -227,7 +248,19 @@ UpdateInputs:
   ld a,0
   call CheckMove
   cp 1
-  jr nz,.next
+  jr z,.blockedLeft
+
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blockedLeft:
+  call TryPushRockLeftAtPlayerTile
+  cp 0
+  jp z,.next
+
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jp z,.next
 
   inc [hl]
   inc [hl]
@@ -237,8 +270,7 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
-
-  jr .next
+  jp .next
 
 .moveUp
   dec [hl]
@@ -253,7 +285,15 @@ UpdateInputs:
   ld a,1
   call CheckMove
   cp 1
-  jr nz,.next
+  jr z,.blockedUp
+
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blockedUp:
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jp z,.next
 
   inc [hl]
   inc [hl]
@@ -263,8 +303,7 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   inc [hl]
-
-  jr .next
+  jp .next
 
 .moveRight
   inc hl
@@ -280,7 +319,19 @@ UpdateInputs:
   ld a,0
   call CheckMove
   cp 1
-  jr nz,.next
+  jr z,.blockedRight
+
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blockedRight:
+  call TryPushRockRightAtPlayerTile
+  cp 0
+  jp z,.next
+
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jp z,.next
 
   dec [hl]
   dec [hl]
@@ -290,15 +341,181 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   dec [hl]
-
-  jr .next
+  jp .next
 
 .next
   pop hl
   ret
 
+; 输出 b=行 c=列（玩家脚下格）
+GetPlayerTilePos:
+  ld a,[ShadowOAM]
+  sub OAM_Y_BIAS
+  srl a
+  srl a
+  srl a
+  ld b,a
+  ld a,[ShadowOAM + 1]
+  sub 8
+  srl a
+  srl a
+  srl a
+  ld c,a
+  ret
+
+; 输入 b=行 c=列，输出 hl -> TILEMAP0 对应格
+GetTilemapPtrBC:
+  ld a,b
+  ld l,a
+  ld h,0
+  add hl,hl
+  add hl,hl
+  add hl,hl
+  add hl,hl
+  add hl,hl
+  ld a,c
+  ld e,a
+  ld d,0
+  add hl,de
+  ld de,TILEMAP0
+  add hl,de
+  ret
+
+; 玩家 OAM 已在目标格时：若是土则挖掉并留在该格（a=0），否则 a=1
+DigIfDirtAtPlayerTile:
+  push hl
+  push bc
+  call GetPlayerTilePos
+  ld a,b
+  cp PLAY_ROWS
+  jr nc,.fail
+  ld a,c
+  cp LEVEL_W
+  jr nc,.fail
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_DIRT
+  jr nz,.fail
+  ld a,TILE_EMPTY
+  ld [hl],a
+  ld a,0
+  jr .done
+.fail
+  ld a,1
+.done
+  pop bc
+  pop hl
+  ret
+
+; 站在金币格：清空背景格、prizeLeft--、刷新底部数字
+TryCollectMoneyAtPlayerTile:
+  push hl
+  push bc
+  call GetPlayerTilePos
+  ld a, b
+  cp PLAY_ROWS
+  jr nc, .done
+  call GetTilemapPtrBC
+  ld a, [hl]
+  cp TILE_MONEY
+  jr nz, .done
+  ld a, TILE_EMPTY
+  ld [hl], a
+  ld a, [prizeLeft]
+  and a
+  jr z, .done
+  dec a
+  ld [prizeLeft], a
+  call UpdatePrizeDigit
+.done
+  pop bc
+  pop hl
+  ret
+
+; 玩家已移动到目标格（该格被阻挡）时，尝试把该格 rock 向左推一格
+; 成功 a=0（玩家保留当前位置），失败 a=1
+TryPushRockLeftAtPlayerTile:
+  push hl
+  push bc
+  call GetPlayerTilePos
+  ld a,b
+  cp PLAY_ROWS
+  jr nc,.fail
+  ld a,c
+  cp LEVEL_W
+  jr nc,.fail
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_ROCK
+  jr nz,.fail
+
+  ld a,c
+  and a
+  jr z,.fail            ; 已在最左列，不能再推
+  dec c
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_EMPTY
+  jr nz,.fail
+  ld a,TILE_ROCK
+  ld [hl],a
+
+  inc c
+  call GetTilemapPtrBC
+  ld a,TILE_EMPTY
+  ld [hl],a
+  ld a,0
+  jr .done
+.fail
+  ld a,1
+.done
+  pop bc
+  pop hl
+  ret
+
+; 玩家已移动到目标格（该格被阻挡）时，尝试把该格 rock 向右推一格
+; 成功 a=0（玩家保留当前位置），失败 a=1
+TryPushRockRightAtPlayerTile:
+  push hl
+  push bc
+  call GetPlayerTilePos
+  ld a,b
+  cp PLAY_ROWS
+  jr nc,.fail
+  ld a,c
+  cp LEVEL_W
+  jr nc,.fail
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_ROCK
+  jr nz,.fail
+
+  ld a,c
+  cp LEVEL_W - 1
+  jr nc,.fail           ; 已在最右列，不能再推
+  inc c
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_EMPTY
+  jr nz,.fail
+  ld a,TILE_ROCK
+  ld [hl],a
+
+  dec c
+  call GetTilemapPtrBC
+  ld a,TILE_EMPTY
+  ld [hl],a
+  ld a,0
+  jr .done
+.fail
+  ld a,1
+.done
+  pop bc
+  pop hl
+  ret
+
 CheckMove:
-  push hl             ; save OAM pointer for move undo (dec [hl])
+  push hl             ; 保护 OAM 指针，供移动撤销 dec [hl] 使用
   cp 1
   jr nz,.XCoordinate
 .YCoordinate
@@ -311,9 +528,9 @@ CheckMove:
 
 .XCoordinate
   ld a,[hl]
-  cp 160+4
+  cp PLAY_X_MAX
   jr nc,.WithdrawMove
-  cp 8
+  cp PLAY_X_MIN
   jr c,.WithdrawMove
 
 .Boundarydetectioncompleted
@@ -357,26 +574,13 @@ CheckMove:
 
   cp TILE_EMPTY
   jr z, .MoveAllowed
-
   cp TILE_START
   jr z, .MoveAllowed
   cp TILE_MONEY
-  ; TODO: add coin counter
-  jr z, .MoveAllowedAndChangeBG
-  cp TILE_DIRT
-  jr z, .MoveAllowedAndChangeBG
-
+  jr z, .MoveAllowed
   jr .TileBlocked
 
-
 .MoveAllowed
-  pop hl
-  ld a, 0
-  ret
-
-.MoveAllowedAndChangeBG    ; change to empty
-  ld a, TILE_EMPTY
-  ld [hl],a
   pop hl
   ld a, 0
   ret
@@ -395,131 +599,50 @@ CheckMove:
   ld a, 1
   ret
 
-RockCheck:
-.SearchForRock
-  ld hl, TILEMAP0 + 1024 - 1  ; hl = last tile (bottom-right, highest address)
-  ld bc, 1024
-
-.SearchRockLoop
-  ld a, [hl]                   ; read current tile id
-  cp TILE_ROCK
+CountMoneyInLevel:
+  ld hl, Level1Map
+  ld bc, LEVEL_SIZE
+  ld d, 0
+.loop:
+  ld a, [hl+]
+  cp TILE_MONEY
   jr nz, .skip
-
-  ; rock found
-.MoveRock
-  ld   d,h          ; hl = original address
-  ld   e,l
-  ld   a, l
-  add  LEVEL_W         ; add 32
-  ld   l, a
-  ld   a, h
-  adc  0               ; handle carry
-  ld   h, a            ; hl now points to the tile directly below
-
-  call CheckRockMove
-  cp 1
-  jr z,.CheckMoveRight
-
-  ; set original rock tile to empty (movement allowed)
-  ld h,d
-  ld l,e
-  ld a,TILE_EMPTY
-  ld [hl],a
-  jr .RockSkip
-
-.CheckMoveRight  ; try moving to lower-left (ambiguous order, no need to check player death yet)
-
-  dec hl         ; hl is already one row down, now one column left
-
-  call CheckRockMove
-  cp 1
-  jr z,.CheckMoveLeft
-
-  ; set original rock tile to empty (movement allowed)
-  ld h,d
-  ld l,e
-  ld a,TILE_EMPTY
-  ld [hl],a
-  jr .RockSkip
-
-.CheckMoveLeft
-
-  inc hl
-  inc hl
-
-  call CheckRockMove
-  cp 1
-  jr z,.RockSkip
-
-  ; set original rock tile to empty (movement allowed)
-  ld h,d
-  ld l,e
-  ld a,TILE_EMPTY
-  ld [hl],a
-  jr .skip
-
-.RockSkip
-  ld h,d
-  ld l,e
-
+  inc d
 .skip
-  dec hl                       ; address -1 → move left one tile (to end of previous row)
   dec bc
   ld a, b
   or c
-  jp nz, .SearchRockLoop
+  jr nz, .loop
+  ld a, d
+  ld [prizeLeft], a
   ret
 
-CheckRockMove:        ; returns 0 if movable, 1 if not
-.CheckRockMoveStart
-  push de             ; save OAM pointer for move undo (dec [hl])
-  push hl
-
-
-.Boundarydetectioncompleted
-  ; check what tile is there, continue if empty
-
-  ld a,[hl]
-  cp TILE_ROCK
-  jr z, .Skip
-  cp TILE_DIRT
-  jr z, .Skip
-  cp TILE_MONEY
-  jr z, .Skip
-  cp TILE_WALL
-  jr z, .Skip
-
-  cp PLAYER_TILE_ID
-  jr z, .Die
-
-  cp TILE_EMPTY
-  jr z, .MoveAllowedAndChangeBG
-
-  jr .Skip
-
-.MoveAllowedAndChangeBG    ; change to rock
-  ld a, TILE_ROCK
-  ld [hl],a
-  pop hl
-  pop de
-  ld a, 0
+UpdatePrizeDigit:
+  ld a, [prizeLeft]
+  add a, 9
+  ld hl, TILEMAP0
+  ld bc, UI_TEXT_ROW * MAP_STRIDE + PRIZE_DIGIT_COL
+  add hl, bc
+  ld [hl], a
   ret
 
-
-.Skip
-  pop hl
-  pop de
-  ld a, 1
+DrawPrizeUI:
+  ld hl, TILEMAP0
+  ld bc, UI_TEXT_ROW * MAP_STRIDE
+  add hl, bc
+  ld de, PrizeUiLine
+  ld b, PrizeUiLine.end - PrizeUiLine
+.copy:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .copy
+  call UpdatePrizeDigit
   ret
-
-.Die
-  pop hl
-  pop de
-  ld a, 1   ; TODO: handle player death
-  ret
-
 
 LoadLevel:
+  call CountMoneyInLevel
   ld hl, Level1Map
   ld de, TILEMAP0
   xor a
@@ -553,20 +676,26 @@ LoadLevel:
   ld a, c
   cp LEVEL_W
   jr nz, .col
+  ld a, MAP_STRIDE - LEVEL_W
+.pad:
+  inc de
+  dec a
+  jr nz, .pad
   inc b
   ld a, b
   cp LEVEL_H
   jr nz, .row
 
-  ld hl, TILEMAP0 + LEVEL_SIZE
-  ld bc, 1024 - LEVEL_SIZE
+  ld bc, 1024 - (LEVEL_H * MAP_STRIDE)
 .fillRest:
   ld a, TILE_EMPTY
-  ld [hl+], a
+  ld [de], a
+  inc de
   dec bc
   ld a, b
   or c
   jr nz, .fillRest
+  call DrawPrizeUI
   ret
 
 Random2bits:
@@ -660,26 +789,32 @@ PressStr:
   DB "PRESS ANY KEY"
 .end
 
+PrizeUiLine:
+  DB "PRIZELEFT "
+.end
 
+
+; 关卡 20 列满宽（无左右墙列）；竖垛列 4/8/12/16：dirt→rock→money→wall
+; 行 0/15 顶底墙；行 16–17 UI
 Level1Map:
-  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,0,0,0,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,3,3,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,3,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,0,5,5,5,0,5,5,5,0,5,5,5,0,5,5,5
+  DB 5,5,5,5,1,5,5,5,1,5,5,5,1,5,5,5,1,5,5,5
+  DB 5,5,5,5,3,5,5,5,3,5,5,5,3,5,5,5,3,5,5,5
+  DB 5,5,5,5,4,5,5,5,4,5,5,5,4,5,5,5,4,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 
 Tiles:
@@ -802,3 +937,4 @@ SECTION "Variables", WRAM0
 ShadowOAM: DS 160
 current: DS 1
 previous: DS 1
+prizeLeft: DS 1
