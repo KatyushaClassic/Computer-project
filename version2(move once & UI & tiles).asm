@@ -1,12 +1,6 @@
-; UpdateInputs: readKeys 后用 c（边沿）→ 每按一次方向键只走一格；b=按住（连续走）
+; [改动 1] UpdateInputs: readKeys 后用 c（边沿），不用 b（按住）→ 每按一次方向键只走一格
 ; [改动 2] CheckMove Y 上界 + 下列常量 → 底部 UI_ROWS 行留给 UI，笑脸不可进入
 INCLUDE "hardware.inc"
-
-; 背景/窗口图块数据须在 $8000（与 CopyTilesToVRAM 一致）；缺 bit4 时 BG 读 $8800 → 整屏空/浅绿
-IF !DEF(LCDC_BG8000)
-  DEF LCDC_BG8000 EQU LCDC_BLOCK01
-ENDC
-DEF LCDC_GAME EQU LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BG8000
 
 DEF OBJCOUNT EQU 1
 DEF PLAYER_TILE_ID EQU 2
@@ -38,12 +32,6 @@ DEF TILE_UI     EQU 7
 DEF PLAY_ROWS   EQU LEVEL_H - UI_ROWS
 DEF UI_TEXT_ROW EQU LEVEL_H - 1
 DEF PRIZE_DIGIT_COL EQU 10
-DEF SHADOW_MAP_BYTES EQU LEVEL_H * MAP_STRIDE
-DEF MAX_DIRTY_TILES  EQU 64
-DEF SETTLE_MAX_STEPS EQU 32
-DEF PRESS_ROW        EQU 8           ; 标题行（屏幕垂直居中附近）
-DEF PRESS_COL        EQU 3           ; (LEVEL_W - 13) / 2，居中 "PRESS ANY KEY"
-DEF PRESS_STR_LEN    EQU 13
 
 CHARMAP " ", 7          ; 空格 → tile 7 (blank)
 CHARMAP "0", 9
@@ -86,8 +74,6 @@ CHARMAP "Z", 44
 SECTION "Header", ROM0[$100]
   jp EntryPoint
 
-  ds $143 - @, 0
-  db $00              ; $0143：仅 DMG
   ds $150 - @, 0
 
 EntryPoint:
@@ -95,81 +81,51 @@ EntryPoint:
   ld a, 0
   ld [rLCDC], a
 
-  call InitGameState
-
-  ld a,%11111100 ; 精灵调色（保持笑脸可见）
+  ld a,%11111100 ; black and white palette
   ld [rOBP0], a
-  ld a,%11111000 ; 背景：像素0=最深色(空地近黑)
+  ld a,%11100100 ; 背景四色对比，否则墙/石/土在绿屏上看不见
   ld [rBGP], a
-  xor a
-  ld [rSCX], a
-  ld [rSCY], a
 
-  call   SetVRAMBank0
-  call   ClearBGAttributes
   call   CopyTilesToVRAM
   ld     hl, STARTOF(OAM)
   call   ResetOAM
   ld     hl, ShadowOAM
-  xor a
-  ld b, 4
-.clearShadowOam:
-  ld [hl+], a
-  dec b
-  jr nz, .clearShadowOam
+  call   ResetOAM
   call   InitializeObjects
-  call   DrawTitleScreen
-  call   PositionTitleSprite
+  call   ResetBG
+  ld hl, TILEMAP0
+  ld de, PressStr
+  ld b, PressStr.end - PressStr
+.copy:
+  ld a,[de]
+  inc de
+  ld [hl+],a
+  dec b
+  jr nz, .copy
 
-  ld a, LCDC_GAME
+  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
-  call   CopyShadowOAMtoOAM
+
 
   call WaitKey
-  call FlushKeyState
 
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
-  call   SetVRAMBank0
-  call   ClearBGAttributes
   call   LoadLevel
-  call   CopyShadowOAMtoOAM
-  ld a, LCDC_GAME
+  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
-  call   PresentFrame
 
 
 MainLoop:
-  call UpdateInputs
+  call WaitVBlank
   call CopyShadowOAMtoOAM
-  call UpdateRocksFall
-  call PresentFrame
+  call UpdateInputs
+  call UpdateFallingRocks
   jp MainLoop
 
 
 SECTION "Functions", ROM0
-
-; WRAM 上电为随机值；须清零，否则 Flush 会把乱码坐标/图块号写进 VRAM
-InitGameState:
-  xor a
-  ld [current], a
-  ld [previous], a
-  ld [prizeLeft], a
-  ld [fallMoved], a
-  ld [fallSrcRow], a
-  ld [fallCol], a
-  call ClearDirtyList
-  ld hl, dirtyList
-  ld bc, MAX_DIRTY_TILES * 2
-.clearDirty:
-  ld [hl+], a
-  dec bc
-  ld a, b
-  or c
-  jr nz, .clearDirty
-  ret
-
 WaitKey:
  call readKeys
  ld a,[current]
@@ -177,20 +133,7 @@ WaitKey:
  jr z, WaitKey
  ret
 
-; 清按键边沿状态，避免标题屏按键“粘住”导致进关后首帧无输入
-FlushKeyState:
-  xor a
-  ld [previous], a
-  ld [current], a
-  ret
-
-SetVRAMBank0:
-  xor a
-  ldh [rVBK], a
-  ret
-
 ResetBG:
-  call SetVRAMBank0
   ld hl,TILEMAP0
   ld bc,1024
 .loop:
@@ -202,45 +145,6 @@ ResetBG:
   jr nz,.loop
   ret
 
-; 标题屏：黑底 + 上下墙线 + 居中 "PRESS ANY KEY"
-DrawTitleScreen:
-  call ResetBG
-  ld a, TILE_WALL
-  ld hl, TILEMAP0 + (PRESS_ROW - 1) * MAP_STRIDE
-  ld b, LEVEL_W
-.borderTop:
-  ld [hl+], a
-  dec b
-  jr nz, .borderTop
-  ld hl, TILEMAP0 + (PRESS_ROW + 1) * MAP_STRIDE
-  ld b, LEVEL_W
-.borderBot:
-  ld [hl+], a
-  dec b
-  jr nz, .borderBot
-  ld hl, TILEMAP0 + PRESS_ROW * MAP_STRIDE + PRESS_COL
-  ld de, PressStr
-  ld b, PRESS_STR_LEN
-.copyPress:
-  ld a, [de]
-  inc de
-  ld [hl+], a
-  dec b
-  jr nz, .copyPress
-  call ClearBGAttributes
-  ret
-
-; 标题屏把笑脸放在文字行中央（Y>=16 才可见，避免左上角残影）
-PositionTitleSprite:
-  ld a, PRESS_ROW * TILE_PX + OAM_Y_BIAS
-  ld [ShadowOAM], a
-  ld a, (LEVEL_W / 2) * TILE_PX + 8
-  ld [ShadowOAM + 1], a
-  ld a, PLAYER_TILE_ID
-  ld [ShadowOAM + 2], a
-  xor a
-  ld [ShadowOAM + 3], a
-  ret
 
 InitializeObjects:
   ld hl,   ShadowOAM   ; hl points to first object entry
@@ -254,125 +158,194 @@ InitializeObjects:
 
   ld a,PLAYER_TILE_ID
   ld [hl], a
+
   inc      hl
-  xor a
-  ld [hl], a           ; OAM flags=0 → CGB 精灵也用 VRAM bank 0
+
+  inc      hl
   ret
 
-; 将 ShadowOAM 同步到硬件 OAM（显式 $FE00，d 必须为 $FE）
 CopyShadowOAMtoOAM:
   ld hl, ShadowOAM
-  ld d, $FE
-  xor a
-  ld e, a
-  ld b, 4
+  ld de, STARTOF(OAM)
+  ld b, OBJCOUNT
 .loop:
-  ld a, [hl+]
-  ld [de], a
+  ld a,[hl+]
+  ld [de],a
+  inc e
+  ld a,[hl+]
+  ld [de],a
+  inc e
+  ld a,[hl+]
+  ld [de],a
+  inc e
+  ld a,[hl+]
+  ld [de],a
   inc e
   dec b
   jr nz, .loop
   ret
 
 UpdateInputs:
+  ld hl,ShadowOAM       ; 人物素材坐标
+  push hl
   call readKeys
-  ld a, c
-  bit 5, a                ; 左
+  ld a,c                ; [改动 1] 原版: ld a,b
+  bit 5,a               ; 左键
   jp nz, .moveLeft
-  bit 6, a                ; 上
+  bit 6,a               ; 上键
   jp nz, .moveUp
-  bit 4, a                ; 右
+  bit 4,a               ; 右键
   jp nz, .moveRight
-  bit 7, a                ; 下
+  bit 7,a               ; 下键
   jp nz, .moveDown
-  ret
 
+  ; 待添加：reset 功能和换关功能
+
+  jp .next
 .moveDown
-  ld a, [ShadowOAM]
-  add a, TILE_PX
-  ld [ShadowOAM], a
-  ld a, 1
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+
+  ld a,1             ; a=1:Y   a=0:X
   call CheckMove
   cp 1
-  jr z, .blockedDown
-  call TryCollectMoneyAtPlayerTile
-  ret
+  jr z,.blocked
 
-.blockedDown:
+  call TryCollectMoneyAtPlayerTile
+  jp .next
+
+.blocked:
   call DigIfDirtAtPlayerTile
   cp 0
-  ret z
-  ld a, [ShadowOAM]
-  sub a, TILE_PX
-  ld [ShadowOAM], a
-  ret
+  jp z,.next
 
-.moveUp
-  ld a, [ShadowOAM]
-  sub a, TILE_PX
-  ld [ShadowOAM], a
-  ld a, 1
-  call CheckMove
-  cp 1
-  jr z, .blockedUp
-  call TryCollectMoneyAtPlayerTile
-  ret
-
-.blockedUp:
-  call DigIfDirtAtPlayerTile
-  cp 0
-  ret z
-  ld a, [ShadowOAM]
-  add a, TILE_PX
-  ld [ShadowOAM], a
-  ret
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  jp .next
 
 .moveLeft
-  ld a, [ShadowOAM + 1]
-  sub a, TILE_PX
-  ld [ShadowOAM + 1], a
-  xor a
+  inc hl
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+
+  ld a,0
   call CheckMove
   cp 1
-  jr z, .blockedLeft
+  jr z,.blockedLeft
+
   call TryCollectMoneyAtPlayerTile
-  ret
+  jp .next
 
 .blockedLeft:
   call TryPushRockLeftAtPlayerTile
   cp 0
-  ret z
-.notPushedLeft:
+  jp z,.next
+
   call DigIfDirtAtPlayerTile
   cp 0
-  ret z
-  ld a, [ShadowOAM + 1]
-  add a, TILE_PX
-  ld [ShadowOAM + 1], a
-  ret
+  jp z,.next
 
-.moveRight
-  ld a, [ShadowOAM + 1]
-  add a, TILE_PX
-  ld [ShadowOAM + 1], a
-  xor a
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  jp .next
+
+.moveUp
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+
+  ld a,1
   call CheckMove
   cp 1
-  jr z, .blockedRight
+  jr z,.blockedUp
+
   call TryCollectMoneyAtPlayerTile
-  ret
+  jp .next
+
+.blockedUp:
+  call DigIfDirtAtPlayerTile
+  cp 0
+  jp z,.next
+
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  jp .next
+
+.moveRight
+  inc hl
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+  inc [hl]
+
+  ld a,0
+  call CheckMove
+  cp 1
+  jr z,.blockedRight
+
+  call TryCollectMoneyAtPlayerTile
+  jp .next
 
 .blockedRight:
   call TryPushRockRightAtPlayerTile
   cp 0
-  ret z
-.notPushedRight:
+  jp z,.next
+
   call DigIfDirtAtPlayerTile
   cp 0
-  ret z
-  ld a, [ShadowOAM + 1]
-  sub a, TILE_PX
-  ld [ShadowOAM + 1], a
+  jp z,.next
+
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  dec [hl]
+  jp .next
+
+.next
+  pop hl
   ret
 
 ; 输出 b=行 c=列（玩家脚下格）
@@ -384,101 +357,15 @@ GetPlayerTilePos:
   srl a
   ld b,a
   ld a,[ShadowOAM + 1]
-  sub PLAY_X_MIN
+  sub 8
   srl a
   srl a
   srl a
   ld c,a
   ret
 
-; 把 OAM 对齐到当前格中心（避免推石/移动后像素偏移）
-SnapPlayerOAMToTile:
-  push bc
-  call GetPlayerTilePos
-  ld a, b
-  add a, a
-  add a, a
-  add a, a
-  add OAM_Y_BIAS
-  ld [ShadowOAM], a
-  ld a, c
-  add a, a
-  add a, a
-  add a, a
-  add PLAY_X_MIN
-  ld [ShadowOAM + 1], a
-  pop bc
-  ret
-
-; 输入 b=行 c=列，输出 hl -> ShadowMap 对应格
-GetShadowMapPtrBC:
-  ld a,b
-  ld l,a
-  ld h,0
-  add hl,hl
-  add hl,hl
-  add hl,hl
-  add hl,hl
-  add hl,hl
-  ld a,c
-  ld e,a
-  ld d,0
-  add hl,de
-  ld de,ShadowMap
-  add hl,de
-  ret
-
-; 写 ShadowMap 格；a=tile，b=行，c=列（并记入脏格列表）
-SetMapTileBC:
-  push bc
-  push af
-  call GetShadowMapPtrBC
-  pop af
-  ld [hl],a
-  pop bc
-  push bc
-  call MarkDirtyBC
-  pop bc
-  ret
-
-; 仅写 ShadowMap（推石/落石内部用，不走脏格队列）
-WriteShadowTileBC:
-  push bc
-  push af
-  call GetShadowMapPtrBC
-  pop af
-  ld [hl], a
-  pop bc
-  ret
-
-; b=行 c=列，记入脏格（供 VBlank 刷 VRAM）
-MarkDirtyBC:
-  push af
-  push hl
-  push de
-  ld a, [dirtyCount]
-  cp MAX_DIRTY_TILES
-  jr nc, .done
-  ld e, a
-  ld d, 0
-  ld hl, dirtyList
-  add hl, de
-  add hl, de
-  ld a, b
-  ld [hl+], a
-  ld a, c
-  ld [hl], a
-  ld a, [dirtyCount]
-  inc a
-  ld [dirtyCount], a
-.done:
-  pop de
-  pop hl
-  pop af
-  ret
-
-; b=行 c=列，输出 hl -> TILEMAP0 对应格
-GetVRAMTilemapPtrBC:
+; 输入 b=行 c=列，输出 hl -> TILEMAP0 对应格
+GetTilemapPtrBC:
   ld a,b
   ld l,a
   ld h,0
@@ -494,105 +381,6 @@ GetVRAMTilemapPtrBC:
   ld de,TILEMAP0
   add hl,de
   ret
-
-ClearDirtyList:
-  xor a
-  ld [dirtyCount], a
-  ret
-
-; 单格 ShadowMap -> VRAM（b=行 c=列）
-RefreshVRAMTileBC:
-  push bc
-  call GetShadowMapPtrBC
-  ld a, [hl]
-  ld e, a
-  pop bc
-  push bc
-  push de
-  call GetVRAMTilemapPtrBC
-  pop de
-  ld a, e
-  ld [hl], a
-  pop bc
-  ret
-
-; 先把脏格列表刷进 VRAM，再整图同步（与 rock.asm PresentFrame 一致）
-FlushDirtyMapCells:
-  ld a, [dirtyCount]
-  or a
-  ret z
-  ld b, a
-  xor a
-  ld c, a
-.loop:
-  push bc
-  push hl
-  ld hl, dirtyList
-  ld a, c
-  add a, a
-  ld e, a
-  ld d, 0
-  add hl, de
-  ld a, [hl+]
-  ld b, a
-  ld a, [hl]
-  ld c, a
-  call SetVRAMBank0
-  call RefreshVRAMTileBC
-  pop hl
-  pop bc
-  inc c
-  dec b
-  jr nz, .loop
-  ret
-
-; VBlank 呈现：整图同步 + OAM（每帧清空脏格，避免脏队列写坏 VRAM）
-PresentFrame:
-  call WaitVBlank
-  call SyncShadowMapToVRAM
-  call CopyShadowOAMtoOAM
-  jp ClearDirtyList
-
-FlushDirtyTilesToVRAM:
-  call SyncShadowMapToVRAM
-  jp ClearDirtyList
-
-; 将 ShadowMap 同步到 VRAM（576 字节游玩区 + UI 行）
-SyncShadowMapToVRAM:
-  call SetVRAMBank0
-  ld hl,ShadowMap
-  ld de,TILEMAP0
-  ld bc,SHADOW_MAP_BYTES
-.loop:
-  ld a,[hl+]
-  ld [de],a
-  inc de
-  dec bc
-  ld a,b
-  or c
-  jr nz,.loop
-  ret
-
-; 进关时：同步 ShadowMap 并清空 tilemap 剩余区域
-SyncShadowMapFull:
-  call SyncShadowMapToVRAM
-  call SetVRAMBank0
-  ld hl, TILEMAP0
-  ld bc, SHADOW_MAP_BYTES
-  add hl, bc
-  ld d, h
-  ld e, l
-  ld bc, 1024 - SHADOW_MAP_BYTES
-  ld a, TILE_EMPTY
-.fillRest:
-  ld [de], a
-  inc de
-  dec bc
-  ld a, b
-  or c
-  jr nz, .fillRest
-  call ClearBGAttributes
-  jp ClearDirtyList
 
 ; 玩家 OAM 已在目标格时：若是土则挖掉并留在该格（a=0），否则 a=1
 DigIfDirtAtPlayerTile:
@@ -605,12 +393,12 @@ DigIfDirtAtPlayerTile:
   ld a,c
   cp LEVEL_W
   jr nc,.fail
-  call GetShadowMapPtrBC
-  ld a,[hl]
+  call GetTilemapPtrBC
+  call ReadTileHL
   cp TILE_DIRT
   jr nz,.fail
   ld a,TILE_EMPTY
-  call SetMapTileBC
+  call WriteTileHL
   ld a,0
   jr .done
 .fail
@@ -628,12 +416,12 @@ TryCollectMoneyAtPlayerTile:
   ld a, b
   cp PLAY_ROWS
   jr nc, .done
-  call GetShadowMapPtrBC
-  ld a, [hl]
+  call GetTilemapPtrBC
+  call ReadTileHL
   cp TILE_MONEY
   jr nz, .done
   ld a, TILE_EMPTY
-  call SetMapTileBC
+  call WriteTileHL
   ld a, [prizeLeft]
   and a
   jr z, .done
@@ -645,184 +433,106 @@ TryCollectMoneyAtPlayerTile:
   pop hl
   ret
 
-; 玩家已挤入石头格时向左推：d=行 e=石头列，dest=e-1
-; 成功 a=0（玩家留在该格，该格变为空地）
+; 玩家已移动到目标格（该格被阻挡）时，尝试把该格 rock 向左推一格
+; 成功 a=0（玩家保留当前位置），失败 a=1
 TryPushRockLeftAtPlayerTile:
-  push bc
   push hl
-  push de
-  call GetPlayerTilePos
-  ld d, b
-  ld e, c
-  ld a, d
-  cp PLAY_ROWS
-  jr nc, .fail
-  ld a, e
-  and a
-  jr z, .fail
-  ld b, d
-  ld c, e
-  call GetShadowMapPtrBC
-  ld a, [hl]
-  cp TILE_ROCK
-  jr nz, .fail
-  ld a, e
-  dec a
-  ld c, a
-  ld b, d
-  call GetShadowMapPtrBC
-  ld a, [hl]
-  cp TILE_EMPTY
-  jr nz, .fail
-  ld b, d
-  ld c, e
-  ld a, TILE_EMPTY
-  call SetMapTileBC
-  ld a, e
-  dec a
-  ld c, a
-  ld b, d
-  ld a, TILE_ROCK
-  call SetMapTileBC
-  xor a
-  jr .done
-.fail
-  ld a, 1
-.done
-  pop de
-  pop hl
-  pop bc
-  ret
-
-; 玩家已挤入石头格时向右推：d=行 e=石头列，dest=e+1
-TryPushRockRightAtPlayerTile:
   push bc
-  push hl
-  push de
   call GetPlayerTilePos
-  ld d, b
-  ld e, c
-  ld a, d
+  ld a,b
   cp PLAY_ROWS
-  jr nc, .fail
-  ld a, e
-  cp LEVEL_W - 1
-  jr nc, .fail
-  ld b, d
-  ld c, e
-  call GetShadowMapPtrBC
-  ld a, [hl]
-  cp TILE_ROCK
-  jr nz, .fail
-  ld a, e
-  inc a
-  ld c, a
-  ld b, d
-  call GetShadowMapPtrBC
-  ld a, [hl]
-  cp TILE_EMPTY
-  jr nz, .fail
-  ld b, d
-  ld c, e
-  ld a, TILE_EMPTY
-  call SetMapTileBC
-  ld a, e
-  inc a
-  ld c, a
-  ld b, d
-  ld a, TILE_ROCK
-  call SetMapTileBC
-  xor a
-  jr .done
-.fail
-  ld a, 1
-.done
-  pop de
-  pop hl
-  pop bc
-  ret
-
-; 落石：每帧每列最多下落一格（多帧叠满），避免 stableLoop 卡死主循环
-UpdateRocksFall:
-  ld c, 0
-.colLoop:
-  push bc
-  call FallRocksColumn
-  pop bc
-  inc c
-  ld a, c
+  jr nc,.fail
+  ld a,c
   cp LEVEL_W
-  jr nz, .colLoop
+  jr nc,.fail
+  call GetTilemapPtrBC
+  call ReadTileHL
+  cp TILE_ROCK
+  jr nz,.fail
+
+  ld a,c
+  and a
+  jr z,.fail            ; 已在最左列，不能再推
+  dec c
+  call GetTilemapPtrBC
+  call ReadTileHL
+  cp TILE_EMPTY
+  jr nz,.fail
+  ld a,TILE_ROCK
+  call WriteTileHL
+
+  inc c
+  call GetTilemapPtrBC
+  ld a,TILE_EMPTY
+  call WriteTileHL
+  ld a,0
+  jr .done
+.fail
+  ld a,1
+.done
+  pop bc
+  pop hl
   ret
 
-; 单列落石：C=列，自上而下；正下方为 TILE_EMPTY 则下落一格（与 rock.asm 一致）
-FallRocksColumn:
-  ld a, c
-  ld [fallCol], a
-  ld b, PLAY_ROWS
-.rowLoop:
-  dec b
-  ld a, b
-  cp $FF
-  ret z
+; 玩家已移动到目标格（该格被阻挡）时，尝试把该格 rock 向右推一格
+; 成功 a=0（玩家保留当前位置），失败 a=1
+TryPushRockRightAtPlayerTile:
+  push hl
   push bc
-  call GetShadowMapPtrBC
-  ld a, [hl]
-  cp TILE_ROCK
-  jr nz, .popRow
-  ld a, b
-  ld [fallSrcRow], a
-  inc a
+  call GetPlayerTilePos
+  ld a,b
   cp PLAY_ROWS
-  jr nc, .popRow
-  ld d, a
-  ld a, [fallCol]
-  ld c, a
-  ld b, d
-  call GetShadowMapPtrBC
-  ld a, [hl]
+  jr nc,.fail
+  ld a,c
+  cp LEVEL_W
+  jr nc,.fail
+  call GetTilemapPtrBC
+  call ReadTileHL
+  cp TILE_ROCK
+  jr nz,.fail
+
+  ld a,c
+  cp LEVEL_W - 1
+  jr nc,.fail           ; 已在最右列，不能再推
+  inc c
+  call GetTilemapPtrBC
+  call ReadTileHL
   cp TILE_EMPTY
-  jr nz, .popRow
-  ld a, [fallCol]
-  ld c, a
-  ld b, d
-  push bc
-  call GetShadowMapPtrBC
-  ld a, TILE_ROCK
-  ld [hl], a
+  jr nz,.fail
+  ld a,TILE_ROCK
+  call WriteTileHL
+
+  dec c
+  call GetTilemapPtrBC
+  ld a,TILE_EMPTY
+  call WriteTileHL
+  ld a,0
+  jr .done
+.fail
+  ld a,1
+.done
   pop bc
-  ld a, [fallSrcRow]
-  ld b, a
-  ld a, [fallCol]
-  ld c, a
-  push bc
-  call GetShadowMapPtrBC
-  ld a, TILE_EMPTY
-  ld [hl], a
-  pop bc
-  ld a, 1
-  ld [fallMoved], a
-.popRow:
-  pop bc
-  jr .rowLoop
+  pop hl
+  ret
 
 CheckMove:
+  push hl             ; 保护 OAM 指针，供移动撤销 dec [hl] 使用
   cp 1
-  jr nz, .XCoordinate
+  jr nz,.XCoordinate
 .YCoordinate
-  ld a, [ShadowOAM]
+  ld a,[hl]
   cp PLAY_Y_MAX + 1
-  jr nc, .WithdrawMove
+  jr nc,.WithdrawMove
   cp PLAY_Y_MIN
-  jr c, .WithdrawMove
+  jr c,.WithdrawMove
   jr .Boundarydetectioncompleted
 
 .XCoordinate
-  ld a, [ShadowOAM + 1]
-  cp PLAY_X_MAX + 1
-  jr nc, .WithdrawMove
+  ld a,[hl]
+  cp PLAY_X_MAX
+  jr nc,.WithdrawMove
   cp PLAY_X_MIN
-  jr c, .WithdrawMove
+  jr c,.WithdrawMove
 
 .Boundarydetectioncompleted
   push bc
@@ -840,14 +550,27 @@ CheckMove:
 
   inc de
   ld a, [de]
-  sub PLAY_X_MIN
+  sub 8
   srl a
   srl a
   srl a
   ld c, a
 
-  call GetShadowMapPtrBC
-  ld a, [hl]
+  ld a, b
+  ld l, a
+  ld h, 0
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  ld a, c
+  ld e, a
+  ld d, 0
+  add hl, de
+  ld bc, TILEMAP0
+  add hl, bc
+  call ReadTileHL
   pop bc
 
   cp TILE_EMPTY
@@ -859,6 +582,7 @@ CheckMove:
   jr .TileBlocked
 
 .MoveAllowed
+  pop hl
   ld a, 0
   ret
 
@@ -867,10 +591,12 @@ CheckMove:
   jr .TileBlocked
 
 .TileBlocked
+  pop hl
   ld a, 1
   ret
 
 .WithdrawMove
+  pop hl
   ld a, 1
   ret
 
@@ -893,17 +619,65 @@ CountMoneyInLevel:
   ret
 
 UpdatePrizeDigit:
-  push bc
   ld a, [prizeLeft]
   add a, 9
-  ld b, UI_TEXT_ROW
-  ld c, PRIZE_DIGIT_COL
-  call SetMapTileBC
-  pop bc
+  ld hl, TILEMAP0
+  ld bc, UI_TEXT_ROW * MAP_STRIDE + PRIZE_DIGIT_COL
+  add hl, bc
+  call WriteTileHL
   ret
 
+; 每帧统一更新所有可下落石头（同帧完成全部调整）
+; 规则：若某 rock 的正下方是 empty，则下落一格
+; 扫描顺序：自底向上，避免同一石头在同帧连续多次下落
+UpdateFallingRocks:
+  ld a, PLAY_ROWS - 1
+  and a
+  ret z
+  dec a
+  ld b, a                   ; b = row，从 PLAY_ROWS-2 到 0
+.rowLoop:
+  ld c, 0                   ; c = col，从 0 到 LEVEL_W-1
+.colLoop:
+  call GetTilemapPtrBC      ; hl -> 当前格
+  call ReadTileHL
+  cp TILE_ROCK
+  jr nz, .nextCol
+
+  ; 检查正下方
+  inc b
+  call GetTilemapPtrBC      ; hl -> 下方格
+  call ReadTileHL
+  dec b
+  cp TILE_EMPTY
+  jr nz, .nextCol
+
+  ; 下方置 rock
+  inc b
+  call GetTilemapPtrBC
+  ld a, TILE_ROCK
+  call WriteTileHL
+  dec b
+
+  ; 原位置清空
+  call GetTilemapPtrBC
+  ld a, TILE_EMPTY
+  call WriteTileHL
+
+.nextCol:
+  inc c
+  ld a, c
+  cp LEVEL_W
+  jr nz, .colLoop
+
+  ld a, b
+  and a
+  ret z
+  dec b
+  jr .rowLoop
+
 DrawPrizeUI:
-  ld hl, ShadowMap
+  ld hl, TILEMAP0
   ld bc, UI_TEXT_ROW * MAP_STRIDE
   add hl, bc
   ld de, PrizeUiLine
@@ -918,10 +692,9 @@ DrawPrizeUI:
   ret
 
 LoadLevel:
-  call ClearDirtyList
   call CountMoneyInLevel
   ld hl, Level1Map
-  ld de, ShadowMap
+  ld de, TILEMAP0
   xor a
   ld b, a
 .row:
@@ -936,7 +709,7 @@ LoadLevel:
   add a
   add a
   add a
-  add PLAY_X_MIN
+  add 8
   ld [ShadowOAM + 1], a
   ld a, b
   add a
@@ -944,10 +717,6 @@ LoadLevel:
   add a
   add OAM_Y_BIAS
   ld [ShadowOAM], a
-  ld a, PLAYER_TILE_ID
-  ld [ShadowOAM + 2], a
-  xor a
-  ld [ShadowOAM + 3], a
   pop bc
   ld a, TILE_EMPTY
 .writeTile:
@@ -957,25 +726,26 @@ LoadLevel:
   ld a, c
   cp LEVEL_W
   jr nz, .col
-  ; 不可用 ld d,...：d 是 de 的高字节，会破坏 ShadowMap 写指针
-  push bc
-  ld bc, MAP_STRIDE - LEVEL_W
+  ld a, MAP_STRIDE - LEVEL_W
 .pad:
+  inc de
+  dec a
+  jr nz, .pad
+  inc b
+  ld a, b
+  cp LEVEL_H
+  jr nz, .row
+
+  ld bc, 1024 - (LEVEL_H * MAP_STRIDE)
+.fillRest:
   ld a, TILE_EMPTY
   ld [de], a
   inc de
   dec bc
   ld a, b
   or c
-  jr nz, .pad
-  pop bc
-  inc b
-  ld a, b
-  cp LEVEL_H
-  jr nz, .row
-
+  jr nz, .fillRest
   call DrawPrizeUI
-  call SyncShadowMapFull
   ret
 
 Random2bits:
@@ -999,7 +769,35 @@ RandomByte:
   ld a,[rDIV]
   xor b
   xor l
-  xor [hl]
+  push de
+  ld d,a
+  call ReadTileHL
+  ld e,a
+  ld a,d
+  xor e
+  pop de
+  ret
+
+WaitVRAMReady:
+.loop:
+  ldh a,[rSTAT]
+  and %00000011
+  cp 3
+  jr z,.loop
+  ret
+
+ReadTileHL:
+  call WaitVRAMReady
+  ld a,[hl]
+  ret
+
+WriteTileHL:
+  push bc
+  ld b,a
+  call WaitVRAMReady
+  ld a,b
+  ld [hl],a
+  pop bc
   ret
 
 WaitVBlank:
@@ -1018,27 +816,11 @@ ResetOAM:
   jr nz,.loop
   ret
 
-; CGB 下 $9C00 为 BG 属性表；须清零，否则背景去 VRAM bank 1 取图（全空=整屏浅绿）
-ClearBGAttributes:
-  call SetVRAMBank0
-  ld hl, TILEMAP1
-  ld bc, TILEMAP_AREA
-  xor a
-.loop:
-  ld [hl+], a
-  dec bc
-  ld a, b
-  or c
-  jr nz, .loop
-  ret
-
-; 图块写入 bank 0；再复制一份到 bank 1，防止属性位误指 bank 1 时图块全空
 CopyTilesToVRAM:
-  call SetVRAMBank0
   ld de, Tiles
-  ld hl, $8000
+  ld hl, STARTOF(VRAM)
   ld bc, TilesEnd - Tiles
-.copyB0:
+.copy:
   ld a,[de]
   inc de
   ld [hl],a
@@ -1048,24 +830,8 @@ CopyTilesToVRAM:
   dec bc
   ld a,b
   or c
-  jr nz, .copyB0
-  ld a, $01
-  ldh [rVBK], a
-  ld de, Tiles
-  ld hl, $8000
-  ld bc, TilesEnd - Tiles
-.copyB1:
-  ld a,[de]
-  inc de
-  ld [hl],a
-  inc hl
-  ld [hl],a
-  inc hl
-  dec bc
-  ld a,b
-  or c
-  jr nz, .copyB1
-  jp SetVRAMBank0
+  jr nz, .copy
+  ret
 
 readKeys:
   ld    a,$20
@@ -1247,12 +1013,6 @@ TilesEnd:
 
 SECTION "Variables", WRAM0
 ShadowOAM: DS 160
-ShadowMap: DS SHADOW_MAP_BYTES
 current: DS 1
 previous: DS 1
 prizeLeft: DS 1
-fallMoved: DS 1
-fallSrcRow: DS 1
-fallCol: DS 1
-dirtyCount: DS 1
-dirtyList: DS MAX_DIRTY_TILES * 2
