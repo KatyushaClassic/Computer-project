@@ -30,7 +30,10 @@ DEF TILE_EMPTY  EQU 5
 DEF TILE_START  EQU 6
 DEF TILE_UI     EQU 7
 DEF PLAY_ROWS   EQU LEVEL_H - UI_ROWS
+DEF LIFE_TEXT_ROW EQU LEVEL_H - 2
 DEF UI_TEXT_ROW EQU LEVEL_H - 1
+DEF LIFE_TENS_COL EQU 5
+DEF LIFE_ONES_COL EQU 6
 DEF PRIZE_DIGIT_COL EQU 10
 
 CHARMAP " ", 7          ; 空格 → tile 7 (blank)
@@ -70,6 +73,7 @@ CHARMAP "W", 41
 CHARMAP "X", 42
 CHARMAP "Y", 43
 CHARMAP "Z", 44
+CHARMAP "!", 45
 
 SECTION "Header", ROM0[$100]
   jp EntryPoint
@@ -120,8 +124,11 @@ EntryPoint:
 MainLoop:
   call WaitVBlank
   call CopyShadowOAMtoOAM
+  call SaveCheckpointState
   call UpdateInputs
   call UpdateFallingRocks
+  call HandlePlayerDeath
+  call HandleWinCondition
   jp MainLoop
 
 
@@ -189,7 +196,7 @@ UpdateInputs:
   ld hl,ShadowOAM       ; 人物素材坐标
   push hl
   call readKeys
-  ld a,c                ; [改动 1] 原版: ld a,b
+  ld a,b                ; 使用按住态，避免边沿丢失导致方向无响应
   bit 5,a               ; 左键
   jp nz, .moveLeft
   bit 6,a               ; 上键
@@ -627,10 +634,38 @@ UpdatePrizeDigit:
   call WriteTileHL
   ret
 
+UpdateLivesDigits:
+  ld hl, TILEMAP0
+  ld bc, LIFE_TEXT_ROW * MAP_STRIDE + LIFE_TENS_COL
+  add hl, bc
+  ld a, [livesLeft]
+  cp 10
+  jr nz, .singleDigit
+  ld a, 10                  ; tile "1"
+  call WriteTileHL
+  inc hl
+  ld a, 9                   ; tile "0"
+  call WriteTileHL
+  ret
+.singleDigit:
+  ld a, 7                   ; blank
+  call WriteTileHL
+  inc hl
+  ld a, [livesLeft]
+  add a, 9                  ; 0..9 -> tile 9..18
+  call WriteTileHL
+  ret
+
 ; 每帧统一更新所有可下落石头（同帧完成全部调整）
 ; 规则：若某 rock 的正下方是 empty，则下落一格
 ; 扫描顺序：自底向上，避免同一石头在同帧连续多次下落
 UpdateFallingRocks:
+  call GetPlayerTilePos
+  ld a, b
+  ld [playerRow], a
+  ld a, c
+  ld [playerCol], a
+
   ld a, PLAY_ROWS - 1
   and a
   ret z
@@ -651,6 +686,19 @@ UpdateFallingRocks:
   dec b
   cp TILE_EMPTY
   jr nz, .nextCol
+
+  ; 若 rock 下落目标格正好是玩家所在格，则标记被砸中
+  inc b
+  ld a, [playerRow]
+  cp b
+  jr nz, .noHit
+  ld a, [playerCol]
+  cp c
+  jr nz, .noHit
+  ld a, 1
+  ld [playerDead], a
+.noHit:
+  dec b
 
   ; 下方置 rock
   inc b
@@ -676,6 +724,185 @@ UpdateFallingRocks:
   dec b
   jr .rowLoop
 
+SaveCheckpointState:
+  ld a, [ShadowOAM]
+  ld [checkpointY], a
+  ld a, [ShadowOAM + 1]
+  ld [checkpointX], a
+  ld a, [prizeLeft]
+  ld [checkpointPrize], a
+
+  ; 保存游玩区地图快照（用于死亡后回到上一步）
+  ld hl, TILEMAP0
+  ld de, checkpointMap
+  ld b, PLAY_ROWS
+.row:
+  ld c, LEVEL_W
+.col:
+  call ReadTileHL
+  ld [de], a
+  inc de
+  inc hl
+  dec c
+  jr nz, .col
+  ld a, MAP_STRIDE - LEVEL_W
+.skip:
+  inc hl
+  dec a
+  jr nz, .skip
+  dec b
+  jr nz, .row
+  ret
+
+RestoreCheckpointState:
+  ; 先恢复地图
+  ld hl, TILEMAP0
+  ld de, checkpointMap
+  ld b, PLAY_ROWS
+.row:
+  ld c, LEVEL_W
+.col:
+  ld a, [de]
+  inc de
+  call WriteTileHL
+  inc hl
+  dec c
+  jr nz, .col
+  ld a, MAP_STRIDE - LEVEL_W
+.skip:
+  inc hl
+  dec a
+  jr nz, .skip
+  dec b
+  jr nz, .row
+
+  ; 再恢复玩家坐标与奖品计数
+  ld a, [checkpointY]
+  ld [ShadowOAM], a
+  ld a, [checkpointX]
+  ld [ShadowOAM + 1], a
+  ld a, [checkpointPrize]
+  ld [prizeLeft], a
+  ret
+
+HandlePlayerDeath:
+  ld a, [playerDead]
+  and a
+  ret z
+  xor a
+  ld [playerDead], a
+
+  ld a, [livesLeft]
+  and a
+  jp z, GameOverScreen
+  dec a
+  ld [livesLeft], a
+  and a
+  jp z, GameOverScreen
+
+  ; 还有命：显示继续页面，按空格后回到死亡前一步（含地图复原）
+  call ContinuePromptScreen
+  call WaitVBlank
+  xor a
+  ld [rLCDC], a
+  call ResetBG
+  call RestoreCheckpointState
+  call DrawLivesUI
+  call DrawPrizeUI
+  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+  ret
+
+ContinuePromptScreen:
+  call WaitVBlank
+  xor a
+  ld [rLCDC], a
+  call ResetBG
+
+  ld hl, TILEMAP0 + (7 * MAP_STRIDE) + 6
+  ld de, DeadStr
+  ld b, DeadStr.end - DeadStr
+.copyDead:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .copyDead
+
+  ld hl, TILEMAP0 + (9 * MAP_STRIDE) + 4
+  ld de, ContinueStr1
+  ld b, ContinueStr1.end - ContinueStr1
+.copyContinue1:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .copyContinue1
+
+  ld hl, TILEMAP0 + (10 * MAP_STRIDE) + 4
+  ld de, ContinueStr2
+  ld b, ContinueStr2.end - ContinueStr2
+.copyContinue2:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .copyContinue2
+
+  ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+
+.waitSpace:
+  call readKeys
+  ld a, b
+  and a
+  ret nz
+  jr .waitSpace
+
+GameOverScreen:
+  call WaitVBlank
+  xor a
+  ld [rLCDC], a
+  call ResetBG
+  ld hl, TILEMAP0 + (8 * MAP_STRIDE) + 6
+  ld de, GameOverStr
+  ld b, GameOverStr.end - GameOverStr
+.copy:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .copy
+  ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+.halt:
+  jp .halt
+
+HandleWinCondition:
+  ld a, [prizeLeft]
+  and a
+  ret nz
+  jp WinScreen
+
+WinScreen:
+  call WaitVBlank
+  xor a
+  ld [rLCDC], a
+  call ResetBG
+  ld hl, TILEMAP0 + (8 * MAP_STRIDE) + 6
+  ld de, WinStr
+  ld b, WinStr.end - WinStr
+.copy:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .copy
+  ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+.halt:
+  jp .halt
+
 DrawPrizeUI:
   ld hl, TILEMAP0
   ld bc, UI_TEXT_ROW * MAP_STRIDE
@@ -691,8 +918,27 @@ DrawPrizeUI:
   call UpdatePrizeDigit
   ret
 
+DrawLivesUI:
+  ld hl, TILEMAP0
+  ld bc, LIFE_TEXT_ROW * MAP_STRIDE
+  add hl, bc
+  ld de, LifeUiLine
+  ld b, LifeUiLine.end - LifeUiLine
+.copy:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .copy
+  call UpdateLivesDigits
+  ret
+
 LoadLevel:
   call CountMoneyInLevel
+  ld a, 10
+  ld [livesLeft], a
+  xor a
+  ld [playerDead], a
   ld hl, Level1Map
   ld de, TILEMAP0
   xor a
@@ -745,7 +991,9 @@ LoadLevel:
   ld a, b
   or c
   jr nz, .fillRest
+  call DrawLivesUI
   call DrawPrizeUI
+  call SaveCheckpointState
   ret
 
 Random2bits:
@@ -871,25 +1119,49 @@ PrizeUiLine:
   DB "PRIZELEFT "
 .end
 
+LifeUiLine:
+  DB "LIFE  "
+.end
+
+DeadStr:
+  DB "YOU DIED"
+.end
+
+ContinueStr1:
+  DB "PRESS SPACE"
+.end
+
+ContinueStr2:
+  DB "TO CONTINUE"
+.end
+
+GameOverStr:
+  DB "GAME OVER"
+.end
+
+WinStr:
+  DB "YOU WIN!"
+.end
+
 
 ; 关卡 20 列满宽（无左右墙列）；竖垛列 4/8/12/16：dirt→rock→money→wall
 ; 行 0/15 顶底墙；行 16–17 UI
 Level1Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,5,5,5,0,5,5,5,0,5,5,5,0,5,5,5,0,5,5,5
-  DB 5,5,5,5,1,5,5,5,1,5,5,5,1,5,5,5,1,5,5,5
-  DB 5,5,5,5,3,5,5,5,3,5,5,5,3,5,5,5,3,5,5,5
-  DB 5,5,5,5,4,5,5,5,4,5,5,5,4,5,5,5,4,5,5,5
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-  DB 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
+  DB 4,6,5,0,0,1,5,3,5,4,5,3,5,1,0,0,5,5,5,4
+  DB 4,5,4,4,5,1,4,0,5,4,5,0,4,1,5,4,4,4,5,4
+  DB 4,5,5,4,5,0,4,0,3,4,3,0,4,0,5,4,5,5,5,4
+  DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,5,4,5,4
+  DB 4,0,5,5,5,5,5,4,1,1,1,4,5,5,5,5,5,4,5,4
+  DB 4,0,4,4,4,4,5,4,0,3,0,4,5,4,4,4,5,4,5,4
+  DB 4,0,5,3,5,4,5,5,5,0,5,5,5,4,5,3,5,5,5,4
+  DB 4,0,5,4,5,4,4,4,5,0,5,4,4,4,5,4,4,4,5,4
+  DB 4,0,5,4,5,5,5,4,5,0,5,4,5,5,5,4,5,5,5,4
+  DB 4,0,5,4,4,4,5,4,5,0,5,4,5,4,4,4,5,4,5,4
+  DB 4,0,5,5,5,4,5,4,5,0,5,4,5,4,3,5,5,4,5,4
+  DB 4,0,4,4,5,4,5,4,5,0,5,4,5,4,1,4,4,4,5,4
+  DB 4,0,5,4,5,5,5,5,5,0,5,5,5,4,1,5,5,5,5,4
+  DB 4,0,5,4,4,4,4,4,5,0,5,4,4,4,1,4,4,4,3,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
   DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
   DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
@@ -1007,7 +1279,7 @@ DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%000000
  DB $00,$46,$2C,$18,$38,$64,$42,$00  ; X
  DB $00,$66,$66,$3C,$18,$18,$18,$00  ; Y
  DB $00,$7E,$0E,$1C,$38,$70,$7E,$00  ; Z
- DB $00,$00,$00,$00,$00,$60,$60,$00  ; .
+ DB $00,$18,$18,$18,$18,$00,$18,$00  ; !
  DB $00,$00,$00,$3C,$3C,$00,$00,$00  ; -
 TilesEnd:
 
@@ -1016,3 +1288,11 @@ ShadowOAM: DS 160
 current: DS 1
 previous: DS 1
 prizeLeft: DS 1
+livesLeft: DS 1
+playerDead: DS 1
+playerRow: DS 1
+playerCol: DS 1
+checkpointY: DS 1
+checkpointX: DS 1
+checkpointPrize: DS 1
+checkpointMap: DS PLAY_ROWS * LEVEL_W
