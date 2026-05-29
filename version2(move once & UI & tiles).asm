@@ -113,13 +113,16 @@ EntryPoint:
   ld a, 0
   ld [rLCDC], a
   call   LoadLevel
+  call   CopyShadowOAMtoOAM
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
 
 MainLoop:
-  call UpdateInputs
   call WaitVBlank
+  ; 在 VBlank 内更新地图与 OAM，避免 VRAM 写入错乱（石头复制/消失）
+  call UpdateInputs
+  call UpdateRocksFall
   call CopyShadowOAMtoOAM
   jp MainLoop
 
@@ -163,24 +166,18 @@ InitializeObjects:
   inc      hl
   ret
 
+; 仅 1 个精灵（玩家），固定复制 4 字节到 OAM
 CopyShadowOAMtoOAM:
   ld hl, ShadowOAM
   ld de, STARTOF(OAM)
-  ld b, OBJCOUNT
+  ld bc, 4
 .loop:
-  ld a,[hl+]
-  ld [de],a
-  inc e
-  ld a,[hl+]
-  ld [de],a
-  inc e
-  ld a,[hl+]
-  ld [de],a
-  inc e
-  ld a,[hl+]
-  ld [de],a
-  inc e
-  dec b
+  ld a, [hl+]
+  ld [de], a
+  inc de
+  dec bc
+  ld a, b
+  or c
   jr nz, .loop
   ret
 
@@ -188,7 +185,7 @@ UpdateInputs:
   ld hl,ShadowOAM       ; 人物素材坐标
   push hl
   call readKeys
-  ld a,c                ; [改动 1] 原版: ld a,b
+  ld a,c                ; [改动 1] 边沿触发：每按一次只走一格
   bit 5,a               ; 左键
   jp nz, .moveLeft
   bit 6,a               ; 上键
@@ -254,6 +251,10 @@ UpdateInputs:
   jp .next
 
 .blockedLeft:
+  call TryPushRockLeftAtPlayerTile
+  cp 0
+  jp z,.next
+
   call DigIfDirtAtPlayerTile
   cp 0
   jp z,.next
@@ -321,6 +322,10 @@ UpdateInputs:
   jp .next
 
 .blockedRight:
+  call TryPushRockRightAtPlayerTile
+  cp 0
+  jp z,.next
+
   call DigIfDirtAtPlayerTile
   cp 0
   jp z,.next
@@ -422,6 +427,160 @@ TryCollectMoneyAtPlayerTile:
 .done
   pop bc
   pop hl
+  ret
+
+; 玩家已移动到目标格（该格被阻挡）时，尝试把该格 rock 向左推一格
+; 成功 a=0（玩家保留当前位置），失败 a=1
+TryPushRockLeftAtPlayerTile:
+  push hl
+  push bc
+  call GetPlayerTilePos
+  ld a,b
+  cp PLAY_ROWS
+  jr nc,.fail
+  ld a,c
+  cp LEVEL_W
+  jr nc,.fail
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_ROCK
+  jr nz,.fail
+
+  ld a,c
+  and a
+  jr z,.fail            ; 已在最左列，不能再推
+  dec c
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_EMPTY
+  jr nz,.fail
+  ld a,TILE_ROCK
+  ld [hl],a
+
+  inc c
+  call GetTilemapPtrBC
+  ld a,TILE_EMPTY
+  ld [hl],a
+  ld a,0
+  jr .done
+.fail
+  ld a,1
+.done
+  pop bc
+  pop hl
+  ret
+
+; 玩家已移动到目标格（该格被阻挡）时，尝试把该格 rock 向右推一格
+; 成功 a=0（玩家保留当前位置），失败 a=1
+TryPushRockRightAtPlayerTile:
+  push hl
+  push bc
+  call GetPlayerTilePos
+  ld a,b
+  cp PLAY_ROWS
+  jr nc,.fail
+  ld a,c
+  cp LEVEL_W
+  jr nc,.fail
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_ROCK
+  jr nz,.fail
+
+  ld a,c
+  cp LEVEL_W - 1
+  jr nc,.fail           ; 已在最右列，不能再推
+  inc c
+  call GetTilemapPtrBC
+  ld a,[hl]
+  cp TILE_EMPTY
+  jr nz,.fail
+  ld a,TILE_ROCK
+  ld [hl],a
+
+  dec c
+  call GetTilemapPtrBC
+  ld a,TILE_EMPTY
+  ld [hl],a
+  ld a,0
+  jr .done
+.fail
+  ld a,1
+.done
+  pop bc
+  pop hl
+  ret
+
+; 每帧落石：逐列自下而上，仅穿过 TILE_EMPTY，一帧内落到最低空位
+; 金币/土/墙/石头均阻挡（须玩家捡币或挖开后再落）
+UpdateRocksFall:
+  ld c, 0
+.colLoop:
+  ld b, PLAY_ROWS - 1
+.rowLoop:
+  push bc
+  call GetTilemapPtrBC
+  ld a, [hl]
+  cp TILE_ROCK
+  jr nz, .skipRock
+
+  ld a, b
+  ld [fallSrcRow], a
+  ld [fallDropRow], a
+
+.tryDrop:
+  ld a, [fallDropRow]
+  inc a
+  cp PLAY_ROWS
+  jr nc, .finishDrop
+
+  push bc
+  ld b, a
+
+.probeCell:
+  call GetTilemapPtrBC
+  ld a, [hl]
+  pop bc
+  cp TILE_EMPTY
+  jr nz, .finishDrop
+
+  ld a, [fallDropRow]
+  inc a
+  ld [fallDropRow], a
+  jr .tryDrop
+
+.finishDrop:
+  ld a, [fallDropRow]
+  ld d, a
+  ld a, [fallSrcRow]
+  cp d
+  jr z, .skipRock
+
+  push bc
+  ld b, d
+  call GetTilemapPtrBC
+  ld a, TILE_ROCK
+  ld [hl], a
+  ld a, [fallSrcRow]
+  ld b, a
+  call GetTilemapPtrBC
+  ld a, TILE_EMPTY
+  ld [hl], a
+  pop bc
+
+.skipRock:
+  pop bc
+  ld a, b
+  and a
+  jr z, .nextCol
+  dec b
+  jr .rowLoop
+
+.nextCol:
+  inc c
+  ld a, c
+  cp LEVEL_W
+  jr nz, .colLoop
   ret
 
 CheckMove:
@@ -528,12 +687,16 @@ CountMoneyInLevel:
   ret
 
 UpdatePrizeDigit:
+  push bc
+  push hl
   ld a, [prizeLeft]
   add a, 9
   ld hl, TILEMAP0
   ld bc, UI_TEXT_ROW * MAP_STRIDE + PRIZE_DIGIT_COL
   add hl, bc
   ld [hl], a
+  pop hl
+  pop bc
   ret
 
 DrawPrizeUI:
@@ -848,3 +1011,5 @@ ShadowOAM: DS 160
 current: DS 1
 previous: DS 1
 prizeLeft: DS 1
+fallSrcRow: DS 1
+fallDropRow: DS 1
