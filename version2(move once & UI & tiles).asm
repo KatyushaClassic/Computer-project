@@ -196,7 +196,18 @@ UpdateInputs:
   ld hl,ShadowOAM       ; 人物素材坐标
   push hl
   call readKeys
-  ld a,b                ; 使用按住态，避免边沿丢失导致方向无响应
+  ; 用 b(按住态)自己做边沿：new = held & ~lastHeld
+  ; 这样保持“按一次走一次”，同时比直接用 c 更稳定
+  ld a,b
+  and $F0               ; 只保留方向键位（bit4~bit7）
+  ld d,a                ; d = held dpad
+  ld a,[dpadLatch]
+  cpl
+  and d
+  ld e,a                ; e = newly pressed dpad
+  ld a,d
+  ld [dpadLatch],a
+  ld a,e
   bit 5,a               ; 左键
   jp nz, .moveLeft
   bit 6,a               ; 上键
@@ -939,6 +950,7 @@ LoadLevel:
   ld [livesLeft], a
   xor a
   ld [playerDead], a
+  ld [dpadLatch], a
   ld hl, Level1Map
   ld de, TILEMAP0
   xor a
@@ -1148,12 +1160,12 @@ WinStr:
 ; 行 0/15 顶底墙；行 16–17 UI
 Level1Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 4,6,5,0,0,1,5,3,5,4,5,3,5,1,0,0,5,5,5,4
+  DB 4,6,5,0,0,1,5,3,5,4,5,3,5,0,0,0,5,5,5,4
   DB 4,5,4,4,5,1,4,0,5,4,5,0,4,1,5,4,4,4,5,4
   DB 4,5,5,4,5,0,4,0,3,4,3,0,4,0,5,4,5,5,5,4
   DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,5,4,5,4
-  DB 4,0,5,5,5,5,5,4,1,1,1,4,5,5,5,5,5,4,5,4
-  DB 4,0,4,4,4,4,5,4,0,3,0,4,5,4,4,4,5,4,5,4
+  DB 4,0,5,5,5,5,5,4,0,1,1,4,5,5,5,5,5,4,5,4
+  DB 4,0,4,4,4,4,5,4,3,0,0,4,5,4,4,4,5,4,5,4
   DB 4,0,5,3,5,4,5,5,5,0,5,5,5,4,5,3,5,5,5,4
   DB 4,0,5,4,5,4,4,4,5,0,5,4,4,4,5,4,4,4,5,4
   DB 4,0,5,4,5,5,5,4,5,0,5,4,5,5,5,4,5,5,5,4
@@ -1296,3 +1308,4 @@ checkpointY: DS 1
 checkpointX: DS 1
 checkpointPrize: DS 1
 checkpointMap: DS PLAY_ROWS * LEVEL_W
+dpadLatch: DS 1
