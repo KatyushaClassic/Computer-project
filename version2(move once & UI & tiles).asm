@@ -28,13 +28,16 @@ DEF TILE_MONEY  EQU 3
 DEF TILE_WALL   EQU 4
 DEF TILE_EMPTY  EQU 5
 DEF TILE_START  EQU 6
-DEF TILE_UI     EQU 7
 DEF PLAY_ROWS   EQU LEVEL_H - UI_ROWS
+DEF GAME_MAP_SIZE EQU PLAY_ROWS * LEVEL_W
+DEF DIRTY_MAX   EQU 255
+DEF DIRTY_BUDGET EQU 96
 DEF LIFE_TEXT_ROW EQU LEVEL_H - 2
 DEF UI_TEXT_ROW EQU LEVEL_H - 1
 DEF LIFE_TENS_COL EQU 5
-DEF LIFE_ONES_COL EQU 6
 DEF PRIZE_DIGIT_COL EQU 10
+DEF SCREEN_MODE_LEVEL EQU 0
+DEF SCREEN_MODE_OVERLAY EQU 1
 
 CHARMAP " ", 7          ; Space -> tile 7 (blank)
 CHARMAP "0", 9
@@ -47,7 +50,7 @@ CHARMAP "6", 15
 CHARMAP "7", 16
 CHARMAP "8", 17
 CHARMAP "9", 18
-CHARMAP "A", 19         ; A → tile 19
+CHARMAP "A", 19         ; A maps to tile 19.
 CHARMAP "B", 20
 CHARMAP "C", 21
 CHARMAP "D", 22
@@ -85,9 +88,9 @@ EntryPoint:
   ld a, 0
   ld [rLCDC], a
 
-  ld a,%11111100 ; black and white palette
+  ld a,%11111100 ; Set OBJ palette.
   ld [rOBP0], a
-  ld a,%11100100 ; High-contrast BG palette so wall/rock/dirt remain visible
+  ld a,%11100100 ; Set high-contrast BG palette.
   ld [rBGP], a
 
   call   CopyTilesToVRAM
@@ -117,21 +120,30 @@ EntryPoint:
   ld a, 0
   ld [rLCDC], a
   call   LoadLevel
+  ld a, SCREEN_MODE_LEVEL
+  ld [screenMode], a
+  call   RenderAllMapToVRAM
+  call   DrawLivesUI
+  call   DrawPrizeUI
+  call   CopyShadowOAMtoOAM
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
 
 MainLoop:
   ; Frame order:
-  ; 1) wait for VBlank, 2) copy sprite data, 3) snapshot state,
-  ; 4) process input, 5) resolve gravity, 6) resolve death/win.
-  call WaitVBlank
-  call CopyShadowOAMtoOAM
+  ; 1) run game logic on WRAM, 2) wait VBlank, 3) render to VRAM/OAM.
   call SaveCheckpointState
   call UpdateInputs
   call UpdateFallingRocks
   call HandlePlayerDeath
   call HandleWinCondition
+  call WaitVBlank
+  ld a,[screenMode]
+  cp SCREEN_MODE_LEVEL
+  jr nz,.skipRender
+  call RenderFrame
+.skipRender:
   jp MainLoop
 
 
@@ -147,7 +159,7 @@ ResetBG:
   ld hl,TILEMAP0
   ld bc,1024
 .loop:
-  ld [hl],5 ; tile 5 = empty space
+  ld [hl],5 ; Fill with empty-space tile.
   inc hl
   dec bc
   ld a,b
@@ -157,13 +169,13 @@ ResetBG:
 
 
 InitializeObjects:
-  ld hl,   ShadowOAM   ; hl points to first object entry
+  ld hl,   ShadowOAM   ; HL points to the first object entry.
 .init:
   ld a,32
-  ld [hl], a           ; set Y coordinate
+  ld [hl], a           ; Set Y coordinate.
   inc      hl
   ld a,32
-  ld [hl], a           ; set X coordinate
+  ld [hl], a           ; Set X coordinate.
   inc      hl
 
   ld a,PLAYER_TILE_ID
@@ -197,29 +209,29 @@ CopyShadowOAMtoOAM:
 
 UpdateInputs:
   ; Input handler for one-step movement, push, dig, and pickup.
-  ld hl,ShadowOAM       ; Player sprite position in shadow OAM
+  ld hl,ShadowOAM       ; Player sprite position in shadow OAM.
   push hl
   call readKeys
   ; Build our own edge trigger from held state:
   ; newPress = held & ~lastHeld
   ; This keeps "one tile per press" behavior with better stability.
   ld a,b
-  and $F0               ; Keep d-pad bits only (bit4~bit7)
-  ld d,a                ; d = held dpad
+  and $F0               ; Keep d-pad bits only (bit4~bit7).
+  ld d,a                ; D holds current d-pad state.
   ld a,[dpadLatch]
   cpl
   and d
-  ld e,a                ; e = newly pressed dpad
+  ld e,a                ; E holds newly pressed d-pad state.
   ld a,d
   ld [dpadLatch],a
   ld a,e
-  bit 5,a               ; Left
+  bit 5,a               ; Left.
   jp nz, .moveLeft
-  bit 6,a               ; Up
+  bit 6,a               ; Up.
   jp nz, .moveUp
-  bit 4,a               ; Right
+  bit 4,a               ; Right.
   jp nz, .moveRight
-  bit 7,a               ; Down
+  bit 7,a               ; Down.
   jp nz, .moveDown
 
   ; Placeholder: reset / stage-switch hotkeys can be added here.
@@ -235,7 +247,7 @@ UpdateInputs:
   inc [hl]
   inc [hl]
 
-  ld a,1             ; a=1:Y   a=0:X
+  ld a,1             ; A=1 for Y move check, A=0 for X move check.
   call CheckMove
   cp 1
   jr z,.blocked
@@ -371,7 +383,7 @@ UpdateInputs:
   pop hl
   ret
 
-; Output: b=row, c=col for the player's current tile.
+; Output: B=row, C=col for the player's current tile.
 GetPlayerTilePos:
   ld a,[ShadowOAM]
   sub OAM_Y_BIAS
@@ -387,8 +399,29 @@ GetPlayerTilePos:
   ld c,a
   ret
 
-; Input: b=row, c=col. Output: hl -> corresponding TILEMAP0 cell.
+; Input: B=row, C=col. Output: HL points to the matching GameMap cell.
+; Note: GameMap is packed with LEVEL_W columns (20), not MAP_STRIDE (32).
 GetTilemapPtrBC:
+  ld a,b
+  ld l,a
+  ld h,0
+  add hl,hl
+  add hl,hl
+  push hl                  ; Row * 4.
+  add hl,hl
+  add hl,hl               ; Row * 16.
+  pop de
+  add hl,de               ; Row * 20.
+  ld a,c
+  ld e,a
+  ld d,0
+  add hl,de
+  ld de,GameMap
+  add hl,de
+  ret
+
+; Input: B=row, C=col. Output: HL points to the matching TILEMAP0 cell.
+GetVRAMPtrBC:
   ld a,b
   ld l,a
   ld h,0
@@ -405,8 +438,81 @@ GetTilemapPtrBC:
   add hl,de
   ret
 
+; Input: B=row, C=col, A=tile.
+; Effect: Writes tile to GameMap.
+SetMapTileBCA:
+  push af
+  call GetTilemapPtrBC
+  pop af
+  ld [hl],a
+  ; Try immediate VRAM mirror update for visual consistency.
+  ; The dirty queue remains as fallback.
+  push af
+  push bc
+  call GetVRAMPtrBC
+  pop bc
+  pop af
+  ld [hl],a
+  call MarkDirtyBC
+  ret
+
+; Input: B=row, C=col.
+; Effect: Enqueues one dirty cell (best effort).
+MarkDirtyBC:
+  push hl
+  push de
+  ld a,[dirtyCount]
+  cp DIRTY_MAX
+  jr nc,.done
+  ld e,a
+  ld d,0
+  ld hl,dirtyRows
+  add hl,de
+  ld [hl],b
+  ld hl,dirtyCols
+  add hl,de
+  ld [hl],c
+  ld a,e
+  inc a
+  ld [dirtyCount],a
+.done:
+  pop de
+  pop hl
+  ret
+
+; Input: B=row, C=col.
+; Effect: Stores one high-priority tile update for next VBlank.
+SetPriorityDirtyBC:
+  ld a,b
+  ld [priorityDirtyRow],a
+  ld a,c
+  ld [priorityDirtyCol],a
+  ld a,1
+  ld [priorityDirtyValid],a
+  ret
+
+; Input: B=row, C=col (player tile).
+; Effect: If there is a rock directly above this tile, lock that row/col until player leaves.
+SetRockWaitIfRockAboveBC:
+  ld a,b
+  and a
+  ret z
+  dec b
+  call GetTilemapPtrBC
+  ld a,[hl]
+  inc b
+  cp TILE_ROCK
+  ret nz
+  ld a,b
+  ld [rockWaitRow],a
+  ld a,c
+  ld [rockWaitCol],a
+  ld a,1
+  ld [rockWaitValid],a
+  ret
+
 ; Player already moved into target tile:
-; if dirt, dig it and stay (a=0), otherwise fail (a=1).
+; If dirt, dig it and stay (A=0), otherwise fail (A=1).
 DigIfDirtAtPlayerTile:
   push hl
   push bc
@@ -418,11 +524,13 @@ DigIfDirtAtPlayerTile:
   cp LEVEL_W
   jr nc,.fail
   call GetTilemapPtrBC
-  call ReadTileHL
+  ld a,[hl]
   cp TILE_DIRT
   jr nz,.fail
+  call SetRockWaitIfRockAboveBC
   ld a,TILE_EMPTY
-  call WriteTileHL
+  call SetMapTileBCA
+  call SetPriorityDirtyBC
   ld a,0
   jr .done
 .fail
@@ -433,7 +541,7 @@ DigIfDirtAtPlayerTile:
   ret
 
 ; If player stands on money:
-; clear tile, decrement prizeLeft, refresh UI digit.
+; Clear tile, decrement prizeLeft, and refresh the UI digit.
 TryCollectMoneyAtPlayerTile:
   push hl
   push bc
@@ -442,25 +550,26 @@ TryCollectMoneyAtPlayerTile:
   cp PLAY_ROWS
   jr nc, .done
   call GetTilemapPtrBC
-  call ReadTileHL
+  ld a,[hl]
   cp TILE_MONEY
   jr nz, .done
+  call SetRockWaitIfRockAboveBC
   ld a, TILE_EMPTY
-  call WriteTileHL
+  call SetMapTileBCA
+  call SetPriorityDirtyBC
   ld a, [prizeLeft]
   and a
   jr z, .done
   dec a
   ld [prizeLeft], a
-  call UpdatePrizeDigit
 .done
   pop bc
   pop hl
   ret
 
 ; Player is already at a blocked target tile:
-; try to push that rock one tile left.
-; Success a=0 (keep player position), fail a=1.
+; Try to push that rock one tile left.
+; Success A=0 (keep player position), fail A=1.
 TryPushRockLeftAtPlayerTile:
   push hl
   push bc
@@ -472,25 +581,25 @@ TryPushRockLeftAtPlayerTile:
   cp LEVEL_W
   jr nc,.fail
   call GetTilemapPtrBC
-  call ReadTileHL
+  ld a,[hl]
   cp TILE_ROCK
   jr nz,.fail
 
   ld a,c
   and a
-  jr z,.fail            ; At left boundary, cannot push further
+  jr z,.fail            ; At left boundary, cannot push further.
   dec c
   call GetTilemapPtrBC
-  call ReadTileHL
+  ld a,[hl]
   cp TILE_EMPTY
   jr nz,.fail
+  push bc                 ; Save original rock position.
   ld a,TILE_ROCK
-  call WriteTileHL
-
-  inc c
-  call GetTilemapPtrBC
+  call SetMapTileBCA
+  pop bc                  ; Restore original rock position.
   ld a,TILE_EMPTY
-  call WriteTileHL
+  call SetMapTileBCA
+  call SetPriorityDirtyBC
   ld a,0
   jr .done
 .fail
@@ -501,8 +610,8 @@ TryPushRockLeftAtPlayerTile:
   ret
 
 ; Player is already at a blocked target tile:
-; try to push that rock one tile right.
-; Success a=0 (keep player position), fail a=1.
+; Try to push that rock one tile right.
+; Success A=0 (keep player position), fail A=1.
 TryPushRockRightAtPlayerTile:
   push hl
   push bc
@@ -514,25 +623,25 @@ TryPushRockRightAtPlayerTile:
   cp LEVEL_W
   jr nc,.fail
   call GetTilemapPtrBC
-  call ReadTileHL
+  ld a,[hl]
   cp TILE_ROCK
   jr nz,.fail
 
   ld a,c
   cp LEVEL_W - 1
-  jr nc,.fail           ; At right boundary, cannot push further
+  jr nc,.fail           ; At right boundary, cannot push further.
   inc c
   call GetTilemapPtrBC
-  call ReadTileHL
+  ld a,[hl]
   cp TILE_EMPTY
   jr nz,.fail
+  push bc                 ; Save original rock position.
   ld a,TILE_ROCK
-  call WriteTileHL
-
-  dec c
-  call GetTilemapPtrBC
+  call SetMapTileBCA
+  pop bc                  ; Restore original rock position.
   ld a,TILE_EMPTY
-  call WriteTileHL
+  call SetMapTileBCA
+  call SetPriorityDirtyBC
   ld a,0
   jr .done
 .fail
@@ -543,7 +652,7 @@ TryPushRockRightAtPlayerTile:
   ret
 
 CheckMove:
-  push hl             ; Preserve OAM pointer for movement rollback path
+  push hl             ; Preserve OAM pointer for movement rollback path.
   cp 1
   jr nz,.XCoordinate
 .YCoordinate
@@ -582,22 +691,8 @@ CheckMove:
   srl a
   srl a
   ld c, a
-
-  ld a, b
-  ld l, a
-  ld h, 0
-  add hl, hl
-  add hl, hl
-  add hl, hl
-  add hl, hl
-  add hl, hl
-  ld a, c
-  ld e, a
-  ld d, 0
-  add hl, de
-  ld bc, TILEMAP0
-  add hl, bc
-  call ReadTileHL
+  call GetTilemapPtrBC
+  ld a,[hl]
   pop bc
 
   cp TILE_EMPTY
@@ -651,7 +746,7 @@ UpdatePrizeDigit:
   ld hl, TILEMAP0
   ld bc, UI_TEXT_ROW * MAP_STRIDE + PRIZE_DIGIT_COL
   add hl, bc
-  call WriteTileHL
+  ld [hl],a
   ret
 
 UpdateLivesDigits:
@@ -661,48 +756,65 @@ UpdateLivesDigits:
   ld a, [livesLeft]
   cp 10
   jr nz, .singleDigit
-  ld a, 10                  ; tile "1"
-  call WriteTileHL
+  ld a, 10                  ; Tile for digit "1".
+  ld [hl],a
   inc hl
-  ld a, 9                   ; tile "0"
-  call WriteTileHL
+  ld a, 9                   ; Tile for digit "0".
+  ld [hl],a
   ret
 .singleDigit:
-  ld a, 7                   ; blank
-  call WriteTileHL
+  ld a, 7                   ; Blank tile.
+  ld [hl],a
   inc hl
   ld a, [livesLeft]
-  add a, 9                  ; 0..9 -> tile 9..18
-  call WriteTileHL
+  add a, 9                  ; Convert 0..9 into tile IDs 9..18.
+  ld [hl],a
   ret
 
 ; Resolve rock gravity once per frame for all rocks.
 ; Rule: a rock falls one tile if the tile directly below is empty.
 ; Scan bottom-up to prevent the same rock from falling multiple times in one frame.
 UpdateFallingRocks:
+  xor a
+  ld [rocksMovedThisPass],a
   call GetPlayerTilePos
   ld a, b
   ld [playerRow], a
   ld a, c
   ld [playerCol], a
 
+  ; Unlock waiting rock once the player leaves the protected tile.
+  ld a,[rockWaitValid]
+  and a
+  jr z,.waitChecked
+  ld a,[rockWaitRow]
+  cp b
+  jr nz,.clearWait
+  ld a,[rockWaitCol]
+  cp c
+  jr z,.waitChecked
+.clearWait:
+  xor a
+  ld [rockWaitValid],a
+.waitChecked:
+
   ld a, PLAY_ROWS - 1
   and a
   ret z
   dec a
-  ld b, a                   ; b=row from PLAY_ROWS-2 down to 0
+  ld b, a                   ; B=row from PLAY_ROWS-2 down to 0.
 .rowLoop:
-  ld c, 0                   ; c=col from 0 to LEVEL_W-1
+  ld c, 0                   ; C=col from 0 to LEVEL_W-1.
 .colLoop:
-  call GetTilemapPtrBC      ; hl -> current tile
-  call ReadTileHL
+  call GetTilemapPtrBC      ; HL -> current tile.
+  ld a,[hl]
   cp TILE_ROCK
   jr nz, .nextCol
 
-  ; Check tile directly below
+  ; Check tile directly below.
   inc b
-  call GetTilemapPtrBC      ; hl -> tile below
-  call ReadTileHL
+  call GetTilemapPtrBC      ; HL -> tile below.
+  ld a,[hl]
   dec b
   cp TILE_EMPTY
   jr nz, .nextCol
@@ -715,22 +827,35 @@ UpdateFallingRocks:
   ld a, [playerCol]
   cp c
   jr nz, .noHit
+  ; If this tile is protected, do not drop into it until player leaves.
+  ld a,[rockWaitValid]
+  and a
+  jr z,.markDead
+  ld a,[rockWaitRow]
+  cp b
+  jr nz,.markDead
+  ld a,[rockWaitCol]
+  cp c
+  jr nz,.markDead
+  dec b
+  jr .nextCol
+.markDead:
   ld a, 1
   ld [playerDead], a
 .noHit:
   dec b
 
-  ; Write rock into lower tile
+  ; Write rock into lower tile.
   inc b
-  call GetTilemapPtrBC
   ld a, TILE_ROCK
-  call WriteTileHL
+  call SetMapTileBCA
   dec b
 
-  ; Clear original tile
-  call GetTilemapPtrBC
+  ; Clear original tile.
   ld a, TILE_EMPTY
-  call WriteTileHL
+  call SetMapTileBCA
+  ld a,1
+  ld [rocksMovedThisPass],a
 
 .nextCol:
   inc c
@@ -740,9 +865,15 @@ UpdateFallingRocks:
 
   ld a, b
   and a
-  ret z
+  jr z,.scanDone
   dec b
   jr .rowLoop
+.scanDone:
+  ld a,[rocksMovedThisPass]
+  and a
+  jp nz, UpdateFallingRocks
+  call RenderAllMapToVRAM
+  ret
 
 SaveCheckpointState:
   ld a, [ShadowOAM]
@@ -753,30 +884,25 @@ SaveCheckpointState:
   ld [checkpointPrize], a
 
   ; Save a snapshot of the playfield for "continue from previous step".
-  ld hl, TILEMAP0
+  ld hl, GameMap
   ld de, checkpointMap
   ld b, PLAY_ROWS
 .row:
   ld c, LEVEL_W
 .col:
-  call ReadTileHL
+  ld a,[hl]
   ld [de], a
   inc de
   inc hl
   dec c
   jr nz, .col
-  ld a, MAP_STRIDE - LEVEL_W
-.skip:
-  inc hl
-  dec a
-  jr nz, .skip
   dec b
   jr nz, .row
   ret
 
 RestoreCheckpointState:
-  ; Restore map first
-  ld hl, TILEMAP0
+  ; Restore map first.
+  ld hl, GameMap
   ld de, checkpointMap
   ld b, PLAY_ROWS
 .row:
@@ -784,19 +910,17 @@ RestoreCheckpointState:
 .col:
   ld a, [de]
   inc de
-  call WriteTileHL
+  ld [hl],a
+  push bc
+  call MarkDirtyBC
+  pop bc
   inc hl
   dec c
   jr nz, .col
-  ld a, MAP_STRIDE - LEVEL_W
-.skip:
-  inc hl
-  dec a
-  jr nz, .skip
   dec b
   jr nz, .row
 
-  ; Then restore player position and prize counter
+  ; Then restore player position and prize counter.
   ld a, [checkpointY]
   ld [ShadowOAM], a
   ld a, [checkpointX]
@@ -813,6 +937,7 @@ HandlePlayerDeath:
   ret z
   xor a
   ld [playerDead], a
+  ld [rockWaitValid], a
 
   ld a, [livesLeft]
   and a
@@ -824,23 +949,19 @@ HandlePlayerDeath:
 
   ; Lives remain: show continue screen.
   ; After key press, restore the previous-step snapshot (including map state).
+  ld a, SCREEN_MODE_OVERLAY
+  ld [screenMode], a
   call ContinuePromptScreen
-  call WaitVBlank
-  xor a
-  ld [rLCDC], a
-  call ResetBG
   call RestoreCheckpointState
-  call DrawLivesUI
-  call DrawPrizeUI
-  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
-  ld [rLCDC], a
+  ld a, SCREEN_MODE_LEVEL
+  ld [screenMode], a
   ret
 
 ContinuePromptScreen:
   ; Minimal continue overlay in a 20x16 visible playfield.
   call WaitVBlank
   xor a
-  ld [rLCDC], a
+  ld [rLCDC],a
   call ResetBG
 
   ld hl, TILEMAP0 + (7 * MAP_STRIDE) + 6
@@ -874,7 +995,7 @@ ContinuePromptScreen:
   jr nz, .copyContinue2
 
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
-  ld [rLCDC], a
+  ld [rLCDC],a
 
 .waitSpace:
   call readKeys
@@ -884,9 +1005,11 @@ ContinuePromptScreen:
   jr .waitSpace
 
 GameOverScreen:
+  ld a, SCREEN_MODE_OVERLAY
+  ld [screenMode], a
   call WaitVBlank
   xor a
-  ld [rLCDC], a
+  ld [rLCDC],a
   call ResetBG
   ld hl, TILEMAP0 + (8 * MAP_STRIDE) + 6
   ld de, GameOverStr
@@ -898,7 +1021,7 @@ GameOverScreen:
   dec b
   jr nz, .copy
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
-  ld [rLCDC], a
+  ld [rLCDC],a
 .halt:
   jp .halt
 
@@ -910,9 +1033,11 @@ HandleWinCondition:
   jp WinScreen
 
 WinScreen:
+  ld a, SCREEN_MODE_OVERLAY
+  ld [screenMode], a
   call WaitVBlank
   xor a
-  ld [rLCDC], a
+  ld [rLCDC],a
   call ResetBG
   ld hl, TILEMAP0 + (8 * MAP_STRIDE) + 6
   ld de, WinStr
@@ -924,7 +1049,7 @@ WinScreen:
   dec b
   jr nz, .copy
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
-  ld [rLCDC], a
+  ld [rLCDC],a
 .halt:
   jp .halt
 
@@ -965,8 +1090,11 @@ LoadLevel:
   xor a
   ld [playerDead], a
   ld [dpadLatch], a
+  ld [dirtyCount], a
+  ld [rockWaitValid], a
+  ld [priorityDirtyValid], a
   ld hl, Level1Map
-  ld de, TILEMAP0
+  ld de, GameMap
   xor a
   ld b, a
 .row:
@@ -998,83 +1126,120 @@ LoadLevel:
   ld a, c
   cp LEVEL_W
   jr nz, .col
-  ld a, MAP_STRIDE - LEVEL_W
-.pad:
-  inc de
-  dec a
-  jr nz, .pad
   inc b
   ld a, b
-  cp LEVEL_H
+  cp PLAY_ROWS
   jr nz, .row
-
-  ld bc, 1024 - (LEVEL_H * MAP_STRIDE)
-.fillRest:
-  ld a, TILE_EMPTY
-  ld [de], a
-  inc de
-  dec bc
-  ld a, b
-  or c
-  jr nz, .fillRest
-  call DrawLivesUI
-  call DrawPrizeUI
   call SaveCheckpointState
   ret
 
-Random2bits:
-  push bc
-  call RandomByte
+; Draw all queued map changes plus UI and OAM during VBlank.
+RenderFrame:
+  call FlushPriorityDirtyToVRAM
+  call FlushDirtyMapToVRAM
+  call DrawLivesUI
+  call DrawPrizeUI
+  call CopyShadowOAMtoOAM
+  ret
+
+FlushPriorityDirtyToVRAM:
+  ld a,[priorityDirtyValid]
+  and a
+  ret z
+  xor a
+  ld [priorityDirtyValid],a
+  ld a,[priorityDirtyRow]
   ld b,a
-
-  swap a
-  xor b
-  ld b,a
-  rrca
-  rrca
-  xor b
-
-  and %00000011
-  pop bc
-  ret
-
-
-RandomByte:
-  ld a,[rDIV]
-  xor b
-  xor l
-  push de
-  ld d,a
-  call ReadTileHL
-  ld e,a
-  ld a,d
-  xor e
-  pop de
-  ret
-
-WaitVRAMReady:
-; Wait until PPU is not in mode 3, so VRAM read/write is safe.
-.loop:
-  ldh a,[rSTAT]
-  and %00000011
-  cp 3
-  jr z,.loop
-  ret
-
-ReadTileHL:
-  ; Safe VRAM read helper.
-  call WaitVRAMReady
-  ld a,[hl]
-  ret
-
-WriteTileHL:
-  ; Safe VRAM write helper (preserves bc).
-  push bc
-  ld b,a
-  call WaitVRAMReady
+  ld a,[priorityDirtyCol]
+  ld c,a
   ld a,b
-  ld [hl],a
+  cp PLAY_ROWS
+  ret nc
+  ld a,c
+  cp LEVEL_W
+  ret nc
+  push bc
+  call GetTilemapPtrBC
+  ld a,[hl]
   pop bc
+  push af
+  call GetVRAMPtrBC
+  pop af
+  ld [hl],a
+  ret
+
+; Full map blit from GameMap to TILEMAP0.
+; Use during level initialization while LCD is off.
+RenderAllMapToVRAM:
+  ld de,GameMap
+  xor a
+  ld b,a
+.row:
+  xor a
+  ld c,a
+.col:
+  push de
+  push bc
+  call GetVRAMPtrBC
+  pop bc
+  pop de
+  ld a,[de]
+  inc de
+  ld [hl],a
+  inc c
+  ld a,c
+  cp LEVEL_W
+  jr nz,.col
+  inc b
+  ld a,b
+  cp PLAY_ROWS
+  jr nz,.row
+  xor a
+  ld [dirtyCount],a
+  ret
+
+; Render a bounded number of queued dirty cells each VBlank.
+FlushDirtyMapToVRAM:
+  ld d,DIRTY_BUDGET
+.loop:
+  ld a,[dirtyCount]
+  and a
+  ret z
+  ld a,d
+  and a
+  ret z
+  dec d
+
+  ; Pop one dirty cell from the queue tail.
+  ld a,[dirtyCount]
+  dec a
+  ld [dirtyCount],a
+  ld c,a
+  ld b,0
+  ld hl,dirtyRows
+  add hl,bc
+  ld b,[hl]
+  ld hl,dirtyCols
+  add hl,bc
+  ld c,[hl]
+
+  ; Guard against corrupted queue entries.
+  ld a,b
+  cp PLAY_ROWS
+  jr nc,.loop
+  ld a,c
+  cp LEVEL_W
+  jr nc,.loop
+
+  push bc
+  call GetTilemapPtrBC
+  ld a,[hl]
+  pop bc
+  push af
+  call GetVRAMPtrBC
+  pop af
+  ld [hl],a
+  jr .loop
   ret
 
 WaitVBlank:
@@ -1174,13 +1339,13 @@ WinStr:
 
 
 ; Level layout notes:
-; - 20 columns full width
-; - rows 0 and 15 are border walls
-; - rows 16-17 are UI rows
+; - 20 columns full width.
+; - Rows 0 and 15 are border walls.
+; - Rows 16-17 are UI rows.
 Level1Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
   DB 4,6,5,0,0,1,5,3,5,4,5,3,5,1,0,0,5,5,5,4
-  DB 4,5,4,4,5,1,4,0,5,4,5,0,4,1,5,4,4,4,5,4
+  DB 4,5,4,4,5,5,4,0,5,4,5,0,4,1,5,4,4,4,5,4
   DB 4,5,5,4,5,0,4,0,3,4,3,0,4,0,5,4,5,5,5,4
   DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,5,4,5,4
   DB 4,0,5,5,5,5,5,4,1,1,1,4,5,5,5,5,5,4,5,4
@@ -1199,7 +1364,7 @@ Level1Map:
 
 
 Tiles:
-;0 = Dirt
+; 0 = Dirt
  DB %10101011
  DB %01010111
  DB %10101011
@@ -1209,7 +1374,7 @@ Tiles:
  DB %00000000
  DB %00000000
 
-;1 = Rock
+; 1 = Rock
  DB %00111100
  DB %01111110
  DB %11011111
@@ -1219,7 +1384,7 @@ Tiles:
  DB %00111100
  DB %00000000
 
-;2 = NPC
+; 2 = NPC
  DB %01111110
  DB %10000001
  DB %10100101
@@ -1229,7 +1394,7 @@ Tiles:
  DB %10000001
  DB %01111110
 
-;3 = Money
+; 3 = Money
  DB %00000000
  DB %00001110
  DB %00111110
@@ -1239,7 +1404,7 @@ Tiles:
  DB %00001110
  DB %00000000
 
-;4 = Wall
+; 4 = Wall
  DB %11111111
  DB %10011001
  DB %11111111
@@ -1249,7 +1414,7 @@ Tiles:
  DB %11111111
  DB %00000000
 
-;5 = Empty space
+; 5 = Empty space
  DB %00000000
  DB %00000000
  DB %00000000
@@ -1259,7 +1424,7 @@ Tiles:
  DB %00000000
  DB %00000000
 
-;6 = Player start
+; 6 = Player start
  DB %00000000
  DB %00000000
  DB %00000000
@@ -1269,11 +1434,11 @@ Tiles:
  DB %00000000
  DB %00000000
 
-;7 = Blank — CHARMAP
+; 7 = Blank (CHARMAP)
 DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
-;8
+; 8
 DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
-; digits and letters
+; Digits and letters
  DB $00,$3C,$66,$66,$66,$66,$3C,$00 ; 0
  DB $00,$18,$38,$18,$18,$18,$3C,$00 ; 1
  DB $00,$3C,$4E,$0E,$3C,$70,$7E,$00
@@ -1328,3 +1493,15 @@ checkpointX: DS 1
 checkpointPrize: DS 1
 checkpointMap: DS PLAY_ROWS * LEVEL_W
 dpadLatch: DS 1
+dirtyCount: DS 1
+dirtyRows: DS DIRTY_MAX
+dirtyCols: DS DIRTY_MAX
+priorityDirtyValid: DS 1
+priorityDirtyRow: DS 1
+priorityDirtyCol: DS 1
+rockWaitValid: DS 1
+rockWaitRow: DS 1
+rockWaitCol: DS 1
+rocksMovedThisPass: DS 1
+screenMode: DS 1
+GameMap: DS GAME_MAP_SIZE
