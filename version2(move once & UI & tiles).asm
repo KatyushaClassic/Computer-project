@@ -1,11 +1,11 @@
-; [改动 1] UpdateInputs: readKeys 后用 c（边沿），不用 b（按住）→ 每按一次方向键只走一格
-; [改动 2] CheckMove Y 上界 + 下列常量 → 底部 UI_ROWS 行留给 UI，笑脸不可进入
+; Input is edge-triggered: one move per discrete d-pad press.
+; Playfield Y bounds reserve UI_ROWS at the bottom (player cannot enter UI rows).
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
 DEF PLAYER_TILE_ID EQU 2
 
-; [改动 2] 底部 2 行 UI 预留（见 PLAY_Y_MAX）
+; Reserve the bottom 2 rows for UI (see PLAY_Y_MAX).
 DEF SCR_H       EQU 144
 DEF UI_ROWS     EQU 2
 DEF TILE_PX     EQU 8
@@ -14,10 +14,10 @@ DEF OAM_Y_BIAS  EQU 16
 DEF PLAY_Y_MAX  EQU SCR_H - (UI_ROWS * TILE_PX) - SPRITE_PX + OAM_Y_BIAS
 DEF PLAY_Y_MIN  EQU OAM_Y_BIAS
 
-; 可见 20 列 × 16 行游玩区，底部 2 行 UI（LEVEL_H - UI_ROWS）
+; Visible play area: 20x16 tiles, plus 2 UI rows at the bottom.
 DEF LEVEL_W     EQU 20
 DEF LEVEL_H     EQU 18
-DEF MAP_STRIDE  EQU 32          ; GB 背景 tilemap 每行 32 格（VRAM 行宽，关卡数据仍 20 列）
+DEF MAP_STRIDE  EQU 32          ; GB background tilemap stride in VRAM (32 columns per row)
 DEF LEVEL_SIZE  EQU LEVEL_W * LEVEL_H
 DEF PLAY_X_MIN  EQU 8
 DEF PLAY_X_MAX  EQU 8 + (LEVEL_W * TILE_PX)
@@ -36,7 +36,7 @@ DEF LIFE_TENS_COL EQU 5
 DEF LIFE_ONES_COL EQU 6
 DEF PRIZE_DIGIT_COL EQU 10
 
-CHARMAP " ", 7          ; 空格 → tile 7 (blank)
+CHARMAP " ", 7          ; Space -> tile 7 (blank)
 CHARMAP "0", 9
 CHARMAP "1", 10
 CHARMAP "2", 11
@@ -87,7 +87,7 @@ EntryPoint:
 
   ld a,%11111100 ; black and white palette
   ld [rOBP0], a
-  ld a,%11100100 ; 背景四色对比，否则墙/石/土在绿屏上看不见
+  ld a,%11100100 ; High-contrast BG palette so wall/rock/dirt remain visible
   ld [rBGP], a
 
   call   CopyTilesToVRAM
@@ -122,6 +122,9 @@ EntryPoint:
 
 
 MainLoop:
+  ; Frame order:
+  ; 1) wait for VBlank, 2) copy sprite data, 3) snapshot state,
+  ; 4) process input, 5) resolve gravity, 6) resolve death/win.
   call WaitVBlank
   call CopyShadowOAMtoOAM
   call SaveCheckpointState
@@ -144,7 +147,7 @@ ResetBG:
   ld hl,TILEMAP0
   ld bc,1024
 .loop:
-  ld [hl],5 ; tile 5 = 空地（黑底）
+  ld [hl],5 ; tile 5 = empty space
   inc hl
   dec bc
   ld a,b
@@ -193,13 +196,15 @@ CopyShadowOAMtoOAM:
   ret
 
 UpdateInputs:
-  ld hl,ShadowOAM       ; 人物素材坐标
+  ; Input handler for one-step movement, push, dig, and pickup.
+  ld hl,ShadowOAM       ; Player sprite position in shadow OAM
   push hl
   call readKeys
-  ; 用 b(按住态)自己做边沿：new = held & ~lastHeld
-  ; 这样保持“按一次走一次”，同时比直接用 c 更稳定
+  ; Build our own edge trigger from held state:
+  ; newPress = held & ~lastHeld
+  ; This keeps "one tile per press" behavior with better stability.
   ld a,b
-  and $F0               ; 只保留方向键位（bit4~bit7）
+  and $F0               ; Keep d-pad bits only (bit4~bit7)
   ld d,a                ; d = held dpad
   ld a,[dpadLatch]
   cpl
@@ -208,16 +213,16 @@ UpdateInputs:
   ld a,d
   ld [dpadLatch],a
   ld a,e
-  bit 5,a               ; 左键
+  bit 5,a               ; Left
   jp nz, .moveLeft
-  bit 6,a               ; 上键
+  bit 6,a               ; Up
   jp nz, .moveUp
-  bit 4,a               ; 右键
+  bit 4,a               ; Right
   jp nz, .moveRight
-  bit 7,a               ; 下键
+  bit 7,a               ; Down
   jp nz, .moveDown
 
-  ; 待添加：reset 功能和换关功能
+  ; Placeholder: reset / stage-switch hotkeys can be added here.
 
   jp .next
 .moveDown
@@ -366,7 +371,7 @@ UpdateInputs:
   pop hl
   ret
 
-; 输出 b=行 c=列（玩家脚下格）
+; Output: b=row, c=col for the player's current tile.
 GetPlayerTilePos:
   ld a,[ShadowOAM]
   sub OAM_Y_BIAS
@@ -382,7 +387,7 @@ GetPlayerTilePos:
   ld c,a
   ret
 
-; 输入 b=行 c=列，输出 hl -> TILEMAP0 对应格
+; Input: b=row, c=col. Output: hl -> corresponding TILEMAP0 cell.
 GetTilemapPtrBC:
   ld a,b
   ld l,a
@@ -400,7 +405,8 @@ GetTilemapPtrBC:
   add hl,de
   ret
 
-; 玩家 OAM 已在目标格时：若是土则挖掉并留在该格（a=0），否则 a=1
+; Player already moved into target tile:
+; if dirt, dig it and stay (a=0), otherwise fail (a=1).
 DigIfDirtAtPlayerTile:
   push hl
   push bc
@@ -426,7 +432,8 @@ DigIfDirtAtPlayerTile:
   pop hl
   ret
 
-; 站在金币格：清空背景格、prizeLeft--、刷新底部数字
+; If player stands on money:
+; clear tile, decrement prizeLeft, refresh UI digit.
 TryCollectMoneyAtPlayerTile:
   push hl
   push bc
@@ -451,8 +458,9 @@ TryCollectMoneyAtPlayerTile:
   pop hl
   ret
 
-; 玩家已移动到目标格（该格被阻挡）时，尝试把该格 rock 向左推一格
-; 成功 a=0（玩家保留当前位置），失败 a=1
+; Player is already at a blocked target tile:
+; try to push that rock one tile left.
+; Success a=0 (keep player position), fail a=1.
 TryPushRockLeftAtPlayerTile:
   push hl
   push bc
@@ -470,7 +478,7 @@ TryPushRockLeftAtPlayerTile:
 
   ld a,c
   and a
-  jr z,.fail            ; 已在最左列，不能再推
+  jr z,.fail            ; At left boundary, cannot push further
   dec c
   call GetTilemapPtrBC
   call ReadTileHL
@@ -492,8 +500,9 @@ TryPushRockLeftAtPlayerTile:
   pop hl
   ret
 
-; 玩家已移动到目标格（该格被阻挡）时，尝试把该格 rock 向右推一格
-; 成功 a=0（玩家保留当前位置），失败 a=1
+; Player is already at a blocked target tile:
+; try to push that rock one tile right.
+; Success a=0 (keep player position), fail a=1.
 TryPushRockRightAtPlayerTile:
   push hl
   push bc
@@ -511,7 +520,7 @@ TryPushRockRightAtPlayerTile:
 
   ld a,c
   cp LEVEL_W - 1
-  jr nc,.fail           ; 已在最右列，不能再推
+  jr nc,.fail           ; At right boundary, cannot push further
   inc c
   call GetTilemapPtrBC
   call ReadTileHL
@@ -534,7 +543,7 @@ TryPushRockRightAtPlayerTile:
   ret
 
 CheckMove:
-  push hl             ; 保护 OAM 指针，供移动撤销 dec [hl] 使用
+  push hl             ; Preserve OAM pointer for movement rollback path
   cp 1
   jr nz,.XCoordinate
 .YCoordinate
@@ -667,9 +676,9 @@ UpdateLivesDigits:
   call WriteTileHL
   ret
 
-; 每帧统一更新所有可下落石头（同帧完成全部调整）
-; 规则：若某 rock 的正下方是 empty，则下落一格
-; 扫描顺序：自底向上，避免同一石头在同帧连续多次下落
+; Resolve rock gravity once per frame for all rocks.
+; Rule: a rock falls one tile if the tile directly below is empty.
+; Scan bottom-up to prevent the same rock from falling multiple times in one frame.
 UpdateFallingRocks:
   call GetPlayerTilePos
   ld a, b
@@ -681,24 +690,24 @@ UpdateFallingRocks:
   and a
   ret z
   dec a
-  ld b, a                   ; b = row，从 PLAY_ROWS-2 到 0
+  ld b, a                   ; b=row from PLAY_ROWS-2 down to 0
 .rowLoop:
-  ld c, 0                   ; c = col，从 0 到 LEVEL_W-1
+  ld c, 0                   ; c=col from 0 to LEVEL_W-1
 .colLoop:
-  call GetTilemapPtrBC      ; hl -> 当前格
+  call GetTilemapPtrBC      ; hl -> current tile
   call ReadTileHL
   cp TILE_ROCK
   jr nz, .nextCol
 
-  ; 检查正下方
+  ; Check tile directly below
   inc b
-  call GetTilemapPtrBC      ; hl -> 下方格
+  call GetTilemapPtrBC      ; hl -> tile below
   call ReadTileHL
   dec b
   cp TILE_EMPTY
   jr nz, .nextCol
 
-  ; 若 rock 下落目标格正好是玩家所在格，则标记被砸中
+  ; If fall target equals player tile, mark player as crushed.
   inc b
   ld a, [playerRow]
   cp b
@@ -711,14 +720,14 @@ UpdateFallingRocks:
 .noHit:
   dec b
 
-  ; 下方置 rock
+  ; Write rock into lower tile
   inc b
   call GetTilemapPtrBC
   ld a, TILE_ROCK
   call WriteTileHL
   dec b
 
-  ; 原位置清空
+  ; Clear original tile
   call GetTilemapPtrBC
   ld a, TILE_EMPTY
   call WriteTileHL
@@ -743,7 +752,7 @@ SaveCheckpointState:
   ld a, [prizeLeft]
   ld [checkpointPrize], a
 
-  ; 保存游玩区地图快照（用于死亡后回到上一步）
+  ; Save a snapshot of the playfield for "continue from previous step".
   ld hl, TILEMAP0
   ld de, checkpointMap
   ld b, PLAY_ROWS
@@ -766,7 +775,7 @@ SaveCheckpointState:
   ret
 
 RestoreCheckpointState:
-  ; 先恢复地图
+  ; Restore map first
   ld hl, TILEMAP0
   ld de, checkpointMap
   ld b, PLAY_ROWS
@@ -787,7 +796,7 @@ RestoreCheckpointState:
   dec b
   jr nz, .row
 
-  ; 再恢复玩家坐标与奖品计数
+  ; Then restore player position and prize counter
   ld a, [checkpointY]
   ld [ShadowOAM], a
   ld a, [checkpointX]
@@ -797,6 +806,8 @@ RestoreCheckpointState:
   ret
 
 HandlePlayerDeath:
+  ; Called once per frame after gravity resolution.
+  ; If crushed, consume one life and either continue or game over.
   ld a, [playerDead]
   and a
   ret z
@@ -811,7 +822,8 @@ HandlePlayerDeath:
   and a
   jp z, GameOverScreen
 
-  ; 还有命：显示继续页面，按空格后回到死亡前一步（含地图复原）
+  ; Lives remain: show continue screen.
+  ; After key press, restore the previous-step snapshot (including map state).
   call ContinuePromptScreen
   call WaitVBlank
   xor a
@@ -825,6 +837,7 @@ HandlePlayerDeath:
   ret
 
 ContinuePromptScreen:
+  ; Minimal continue overlay in a 20x16 visible playfield.
   call WaitVBlank
   xor a
   ld [rLCDC], a
@@ -890,6 +903,7 @@ GameOverScreen:
   jp .halt
 
 HandleWinCondition:
+  ; Win condition: all money collected.
   ld a, [prizeLeft]
   and a
   ret nz
@@ -1039,6 +1053,7 @@ RandomByte:
   ret
 
 WaitVRAMReady:
+; Wait until PPU is not in mode 3, so VRAM read/write is safe.
 .loop:
   ldh a,[rSTAT]
   and %00000011
@@ -1047,11 +1062,13 @@ WaitVRAMReady:
   ret
 
 ReadTileHL:
+  ; Safe VRAM read helper.
   call WaitVRAMReady
   ld a,[hl]
   ret
 
 WriteTileHL:
+  ; Safe VRAM write helper (preserves bc).
   push bc
   ld b,a
   call WaitVRAMReady
@@ -1156,15 +1173,17 @@ WinStr:
 .end
 
 
-; 关卡 20 列满宽（无左右墙列）；竖垛列 4/8/12/16：dirt→rock→money→wall
-; 行 0/15 顶底墙；行 16–17 UI
+; Level layout notes:
+; - 20 columns full width
+; - rows 0 and 15 are border walls
+; - rows 16-17 are UI rows
 Level1Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 4,6,5,0,0,1,5,3,5,4,5,3,5,0,0,0,5,5,5,4
+  DB 4,6,5,0,0,1,5,3,5,4,5,3,5,1,0,0,5,5,5,4
   DB 4,5,4,4,5,1,4,0,5,4,5,0,4,1,5,4,4,4,5,4
   DB 4,5,5,4,5,0,4,0,3,4,3,0,4,0,5,4,5,5,5,4
   DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,5,4,5,4
-  DB 4,0,5,5,5,5,5,4,0,1,1,4,5,5,5,5,5,4,5,4
+  DB 4,0,5,5,5,5,5,4,1,1,1,4,5,5,5,5,5,4,5,4
   DB 4,0,4,4,4,4,5,4,3,0,0,4,5,4,4,4,5,4,5,4
   DB 4,0,5,3,5,4,5,5,5,0,5,5,5,4,5,3,5,5,5,4
   DB 4,0,5,4,5,4,4,4,5,0,5,4,4,4,5,4,4,4,5,4
