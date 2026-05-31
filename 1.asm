@@ -66,6 +66,9 @@ EntryPoint:
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
+  
+  ld a, 3                     ;初始化生命值
+  ld [PlayerLives], a
 
   ld a,%11111100 ; black and white palette
   ld [rOBP0], a
@@ -115,22 +118,38 @@ EntryPoint:
 MainLoop:
   call UpdateInputs           ; [改动 3] 逻辑操作 ShadowTilemap（WRAM，随时安全）
   call RockCheck              ; [改动 3] 逻辑操作 ShadowTilemap（WRAM，随时安全）
+  call CheckPlayerDeath
   call WaitVBlank
   call CopyShadowOAMtoOAM
-  
-  ; call CopyShadowTilemapToVRAM; [改动 3] (已注释) 因 4560 cycles 限制，不再全局复制
   call ProcessDirtyQueue      ; [改动 4] VBlank 中一次性仅将发生变化的 Tile 刷入 VRAM
   
   jp MainLoop
 
 
 SECTION "Functions", ROM0
+
 WaitKey:
- call readKeys
- ld a,[current]
- or a
- jr z, WaitKey
- ret
+  ; 【第一步】安全防抖：先等待当前按下的所有按键全部释放
+  ; 防止走入格子砸死时，玩家还没来得及松开的方向键直接触发解除冻结
+.waitRelease:
+  call WaitVBlank           ; 降速到帧率（1/60秒），杜绝 CPU 级别的超高速按键抖动
+  call readKeys
+  ld a, [previous]          ; 检查当前是否有任何按键正被按住
+  or a
+  jr nz, .waitRelease       ; 如果还有键没松开，继续等待
+
+  ; 【第二步】真正等待玩家按下任意新按键
+.waitPress:
+  call WaitVBlank
+  call readKeys
+  ld a, [current]           ; 检查是否有新的按键边沿触发
+  or a
+  jr z, .waitPress          ; 没有按键按下则继续死循环等待
+
+  ; 【第三步】核心修复：退出前强行清空上一帧按键映射
+  xor a
+  ld [previous], a          ; 擦除历史记录！
+  ret
 
 ResetBG:
   ld hl,ShadowTilemap         ; [改动 3] 清空 ShadowTilemap（原 TILEMAP0）
@@ -518,13 +537,13 @@ RockCheck:
 .SearchRockLoop
   ld a, [hl]                   ; 读取当前 tile 编号
   cp TILE_ROCK                 
-  jr nz, .skip
+  jp nz, .skip
   
   ;检测到石头
 .MoveRock
   ld   d,h          ; hl = 原地址
   ld   e,l
-  ld   a, l
+  ld   a,l
   add  LEVEL_W        ; 加上 32
   ld   l, a
   ld   a, h
@@ -542,14 +561,48 @@ RockCheck:
   ld [hl],a
   call QueueTileUpdate       ; [改动 4] 坠落产生空位，入队
   jr .RockSkip
+  
+.CheckMoveRight
+  
+  ;[改动 5]下方是石头才进行左右检测
+  ld a,[hl]
+  cp TILE_ROCK
+  jr nz,.RockSkip
 
-.CheckMoveRight  ;检测向左下移动是否可以（不清楚先左还是右,无需检测玩家死亡）
+  .ContinueCheckMoveRight
+  ;检测向左下移动是否可以（不清楚先左还是右,无需检测玩家死亡）
+  ;往上再往左,检测左边
+  dec hl
+  
+  ld   a,l               ;hl-32
+  sub  LEVEL_W 
+  ld   l, a
+  ld   a, h
+  sbc  0              
+  ld   h, a
+  
+  ld a,[hl]
+  cp TILE_ROCK
+  jr z, .CheckMoveLeft
+  cp TILE_DIRT
+  jr z, .CheckMoveLeft
+  cp TILE_MONEY
+  jr z, .CheckMoveLeft
+  cp TILE_WALL
+  jr z, .CheckMoveLeft
  
-  dec hl         ;此时hl已经往下移了一格了,然后往左一格
+  ;左下方检测
+  ld   a,l               ;hl+32
+  add  LEVEL_W 
+  ld   l, a
+  ld   a, h
+  adc  0              
+  ld   h, a   
+
   
   call CheckRockMove
   cp 1
-  jr z,.CheckMoveLeft
+  jr z,.ReturnHL
   
   ;将石头这格设为空（此时已经可以移动）
   ld h,d
@@ -559,10 +612,36 @@ RockCheck:
   call QueueTileUpdate       ; [改动 4] 产生空位，入队
   jr .RockSkip
   
-.CheckMoveLeft
+.ReturnHL
+  ld   a,l               ;hl-32
+  sub  LEVEL_W 
+  ld   l, a
+  ld   a, h
+  sbc  0              
+  ld   h, a     
   
+.CheckMoveLeft
+  ;右方检测
   inc hl
   inc hl
+  
+  ld a,[hl]
+  cp TILE_ROCK
+  jr z, .RockSkip
+  cp TILE_DIRT
+  jr z, .RockSkip
+  cp TILE_MONEY
+  jr z, .RockSkip
+  cp TILE_WALL
+  jr z, .RockSkip
+  
+  ;右下方检测
+  ld   a,l               ;hl+32
+  add  LEVEL_W 
+  ld   l, a
+  ld   a, h
+  adc  0              
+  ld   h, a   
   
   call CheckRockMove
   cp 1
@@ -576,7 +655,7 @@ RockCheck:
   call QueueTileUpdate       ; [改动 4] 产生空位，入队
   jr .RockSkip              ; [改动 3] 统一跳 .RockSkip（原 .skip）
 
-.RockSkip
+.RockSkip                    ;因为石头会改hl值，所以需要重新赋值
   ld h,d
   ld l,e
   
@@ -607,9 +686,6 @@ CheckRockMove:        ;返回0就是可以移动，1就是不可以移动
   cp TILE_WALL
   jr z, .Skip
   
-  cp PLAYER_TILE_ID
-  jr z, .Die
-  
   cp TILE_EMPTY
   jr z, .MoveAllowedAndChangeBG
   
@@ -631,12 +707,86 @@ CheckRockMove:        ;返回0就是可以移动，1就是不可以移动
   ld a, 1
   ret
   
-.Die
-  pop hl
-  pop de
+CheckPlayerDeath:
+  ; 【第一步】计算玩家当前的 Tilemap 索引 (复用你 CheckMove 里的逻辑)
+  ld de, ShadowOAM
+  ld a, [de]
+  sub OAM_Y_BIAS
+  srl a
+  srl a
+  srl a
+  ld b, a            ; b = 玩家 Y 坐标 (Tile)
+
+  inc de
+  ld a, [de]
+  sub 8
+  srl a
+  srl a
+  srl a
+  ld c, a            ; c = 玩家 X 坐标 (Tile)
+
+  ; 算出 hl = ShadowTilemap + (Y * 32) + X
+  ld a, b
+  ld l, a
+  ld h, 0
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  ld a, c
+  ld e, a
+  ld d, 0
+  add hl, de
+  ld de, ShadowTilemap
+  add hl, de         ; 此时 hl 指向玩家当前所在的 Tile 地址
+
+  ; 【第二步】检测玩家头上是不是石头
+  ld a, [hl]
+  cp TILE_ROCK
+  ret nz            ; 如果不是石头，说明没被砸，直接 ret 返回继续游戏
+
+  ; =========================================
+  ; 下方为被砸死后的处理逻辑
+  ; =========================================
+
+  ; 【第三步】将这颗石头重新上移一格
+  ld a, TILE_EMPTY
+  ld [hl], a
+  call QueueTileUpdate
   
+  ; hl 往上一行 (hl - 32)
+  ld a, l
+  sub LEVEL_W
+  ld l, a
+  ld a, h
+  sbc 0
+  ld h, a
+  
+  ld a, TILE_ROCK
+  ld [hl], a
+  call QueueTileUpdate   ; 正上方一格变回石头
+
+  ; 【第四步】扣除生命值
+  ld a, [PlayerLives]
+  dec a
+  ld [PlayerLives], a
+  jr z, .GameOver        ; 如果生命值为 0，跳转到 Game Over
+  
+  call WaitVBlank
+  call CopyShadowOAMtoOAM
+  call ProcessDirtyQueue
+
+  ; 【第五步】冻结并等待玩家按键
+  call WaitKey           
+  ; 玩家按键后，回归
   ret
 
+.GameOver
+  ; 命用完的处理：目前暂时做成死循环冻结
+.deadLoop
+  call WaitVBlank
+  jr .deadLoop
   
 LoadLevel:
   ld hl, Level1Map
@@ -786,7 +936,7 @@ Level1Map:
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,0,0,0,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,3,3,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,3,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
@@ -794,8 +944,8 @@ Level1Map:
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
-  DB 4,5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,4
+  DB 4,5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,5,5,5,5,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
   DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
   DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
@@ -921,6 +1071,7 @@ SECTION "Variables", WRAM0
 ShadowOAM: DS 160
 current: DS 1
 previous: DS 1
+PlayerLives: DS 1        ; 玩家生命值
 ShadowTilemap: DS 1024       ; [改动 3] tilemap 的 WRAM 影子（1024 字节）
 DirtyQueueCount: DS 1        ; [改动 4] 脏区队列当前更新计数 (0~64)
 DirtyQueueData: DS 64 * 3    ; [改动 4] 脏区队列缓存，最大支持 64 次 Tile 更新，每组占据 3 字节 (VRAM H, VRAM L, TileID)
