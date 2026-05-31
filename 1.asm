@@ -1,6 +1,7 @@
 ; [改动 1] UpdateInputs: readKeys 后用 c（边沿），不用 b（按住）→ 每按一次方向键只走一格
 ; [改动 2] CheckMove Y 上界 + 下列常量 → 底部 UI_ROWS 行留给 UI，笑脸不可进入
 ; [改动 3] 所有 tilemap 读写改为 WRAM 影子地图 (ShadowTilemap)，仅在 VBlank 同步到 VRAM
+; [改动 4] 增加脏区，改善vblank
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
@@ -103,6 +104,10 @@ EntryPoint:
   ld [rLCDC], a
   call   LoadLevel            ; [改动 3] 关卡数据加载到 ShadowTilemap
   call CopyShadowTilemapToVRAM; [改动 3] 开屏前同步到 VRAM
+  
+  xor a                       ; [改动 4] 开屏前初始化脏区队列为空
+  ld [DirtyQueueCount], a
+  
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
@@ -112,7 +117,10 @@ MainLoop:
   call RockCheck              ; [改动 3] 逻辑操作 ShadowTilemap（WRAM，随时安全）
   call WaitVBlank
   call CopyShadowOAMtoOAM
-  ; [改动 4] 删除了耗时极长的全量复制 call CopyShadowTilemapToVRAM，改为按需局部更新
+  
+  ; call CopyShadowTilemapToVRAM; [改动 3] (已注释) 因 4560 cycles 限制，不再全局复制
+  call ProcessDirtyQueue      ; [改动 4] VBlank 中一次性仅将发生变化的 Tile 刷入 VRAM
+  
   jp MainLoop
 
 
@@ -176,7 +184,7 @@ CopyShadowOAMtoOAM:
   jr nz, .loop
   ret
 
-; [改动 3] 新增：将 ShadowTilemap (WRAM) 整体复制到 VRAM TILEMAP0
+; [改动 3]：将 ShadowTilemap (WRAM) 整体复制到 VRAM TILEMAP0
 CopyShadowTilemapToVRAM:
   ld hl, ShadowTilemap
   ld de, TILEMAP0
@@ -189,6 +197,85 @@ CopyShadowTilemapToVRAM:
   ld a, b
   or c
   jr nz, .loop
+  ret
+
+; [改动 4] 将更新的 Tile 加入脏区队列
+; 约定: 调用前 hl 为 ShadowTilemap 内的绝对地址, a 为新写入的 TileID
+QueueTileUpdate:
+  push hl
+  push de
+  push bc
+  push af
+
+  ld a, [DirtyQueueCount]
+  cp 64                      ; [改动 4] 限制最大入队 64 个，防止队列溢出破坏 WRAM
+  jr nc, .skipQueueAdd
+
+  ; 计算出对等在 VRAM 的目标地址 (de = hl - ShadowTilemap + TILEMAP0)
+  ld de, ShadowTilemap
+  ld a, l
+  sub e
+  ld c, a
+  ld a, h
+  sbc d
+  ld b, a                    ; bc = 在 Map 里的偏移量
+
+  ld hl, TILEMAP0
+  add hl, bc
+  ld d, h
+  ld e, l                    ; de = 最终算出的 VRAM 目标写入地址
+
+  ; 获取当前队列尾部写入指针
+  ld a, [DirtyQueueCount]
+  ld c, a
+  ld b, 0
+  ld hl, DirtyQueueData
+  add hl, bc                 ; 每项占 3 字节，所以需要加三次 bc
+  add hl, bc
+  add hl, bc
+
+  ; 写入队列 (格式: VRAM高位, VRAM低位, TileID)
+  ld [hl], d                 ; 存高位
+  inc hl
+  ld [hl], e                 ; 存低位
+  inc hl
+  pop af                     ; 临时弹回刚才要存的 TileID
+  push af                    ; 再压回，防止影响调用者
+  ld [hl], a                 ; 存 TileID
+
+  ; 计数器 +1
+  ld a, [DirtyQueueCount]
+  inc a
+  ld [DirtyQueueCount], a
+
+.skipQueueAdd
+  pop af
+  pop bc
+  pop de
+  pop hl
+  ret
+
+; [改动 4] 消耗脏区队列：在 VBlank 时把队列中的元素真正刷到 VRAM
+ProcessDirtyQueue:
+  ld a, [DirtyQueueCount]
+  and a
+  ret z                      ; 如果队列空，直接返回，不消耗周期
+
+  ld b, a                    ; b 作为循环倒数计数
+  ld hl, DirtyQueueData
+.loop:
+  ld d, [hl]                 ; 提取 VRAM 高地址
+  inc hl
+  ld e, [hl]                 ; 提取 VRAM 低地址
+  inc hl
+  ld a, [hl]                 ; 提取新 TileID
+  inc hl
+  ld [de], a                 ; 快速写入真正的 VRAM
+  dec b
+  jr nz, .loop
+
+  xor a
+  ld [DirtyQueueCount], a    ; 一次性将队列清空
   ret
 
 UpdateInputs:
@@ -390,7 +477,7 @@ CheckMove:
   jr z, .MoveAllowedAndChangeBG
   
   jr .TileBlocked
- 
+  
 
 .MoveAllowed
   pop hl
@@ -398,20 +485,12 @@ CheckMove:
   ret
   
 .MoveAllowedAndChangeBG    ;改成空
-  push bc                  ; [改动 3] 保护 bc
-  ld bc, ShadowTilemap     ; [改动 3] hl(索引) + bc(基址) = WRAM 地址
+  push bc                 ; [改动 3] 保护 bc
+  ld bc, ShadowTilemap    ; [改动 3] hl(索引) + bc(基址) = WRAM 地址
   add hl, bc
   ld a, TILE_EMPTY
-  ld [hl],a                ; [改动 3] 修复白屏/吃土失效：现在正确写入 ShadowTilemap
-
-  ; [改动 4] 新增：将改动局部同步更新至 VRAM
-  push hl
-  ld bc, TILEMAP0 - ShadowTilemap
-  add hl, bc
-  call WriteVRAMSafe
-  pop hl
-  ; [改动 4] 结束
-
+  ld [hl],a               ; [改动 3] 修复白屏/吃土失效：现在正确写入 ShadowTilemap
+  call QueueTileUpdate    ; [改动 4] 玩家走过的地方变更为了空地，推入队列中
   pop bc                  ; [改动 3] 恢复 bc
   pop hl
   ld a, 0
@@ -431,110 +510,133 @@ CheckMove:
   ld a, 1
   ret
 
-; [改动 4] 彻底重构了 RockCheck 逻辑，极大优化指令周期并按需更新 VRAM
 RockCheck:
-  ; 只扫描实际游戏区域，跳过无用的底层内存。从倒数第二行开始扫描
-  ld hl, ShadowTilemap + LEVEL_SIZE - 1 - LEVEL_W 
-  ld bc, LEVEL_SIZE - LEVEL_W
-
-.SearchRockLoop:
-  ld a, [hld]        ; 利用 hld 自动递减
-  cp TILE_ROCK
-  jr nz, .NextTile
-
-.MoveRock:
-  inc hl             ; 补回 hld 多减的 1
-  ld d, h            ; de 保存原石头地址
-  ld e, l
-
-  push bc            ; 保护主循环计数器
-
-  ld bc, LEVEL_W
-  add hl, bc         ; hl 现在是正下方的地址
-
+.SearchForRock
+  ld hl, ShadowTilemap + 1024 - 1  ; [改动 3] 扫描 ShadowTilemap（原 TILEMAP0）
+  ld bc, 1024
+  
+.SearchRockLoop
+  ld a, [hl]                   ; 读取当前 tile 编号
+  cp TILE_ROCK                 
+  jr nz, .skip
+  
+  ;检测到石头
+.MoveRock
+  ld   d,h          ; hl = 原地址
+  ld   e,l
+  ld   a, l
+  add  LEVEL_W        ; 加上 32
+  ld   l, a
+  ld   a, h
+  adc  0              ; 处理进位
+  ld   h, a           ; hl 现在是正下方的地址
+  
   call CheckRockMove
-  cp 0               ; 0 表示可以移动（CheckRockMove 内部已将其变成石头）
-  jr z, .RockMoved
+  cp 1
+  jr z,.CheckMoveRight
+  
+  ;将石头这格设为空（此时已经可以移动）
+  ld h,d
+  ld l,e
+  ld a,TILE_EMPTY
+  ld [hl],a
+  call QueueTileUpdate       ; [改动 4] 坠落产生空位，入队
+  jr .RockSkip
 
-  ; 检测左下 (hl - 1)
-  dec hl
+.CheckMoveRight  ;检测向左下移动是否可以（不清楚先左还是右,无需检测玩家死亡）
+ 
+  dec hl         ;此时hl已经往下移了一格了,然后往左一格
+  
   call CheckRockMove
-  cp 0
-  jr z, .RockMoved
-
-  ; 检测右下 (刚才减了1，现在要加2才能到右边)
+  cp 1
+  jr z,.CheckMoveLeft
+  
+  ;将石头这格设为空（此时已经可以移动）
+  ld h,d
+  ld l,e
+  ld a,TILE_EMPTY
+  ld [hl],a
+  call QueueTileUpdate       ; [改动 4] 产生空位，入队
+  jr .RockSkip
+  
+.CheckMoveLeft
+  
   inc hl
   inc hl
+  
   call CheckRockMove
-  cp 0
-  jr z, .RockMoved
+  cp 1
+  jr z,.RockSkip
+  
+  ;将石头这格设为空（此时已经可以移动）
+  ld h,d
+  ld l,e
+  ld a,TILE_EMPTY
+  ld [hl],a
+  call QueueTileUpdate       ; [改动 4] 产生空位，入队
+  jr .RockSkip              ; [改动 3] 统一跳 .RockSkip（原 .skip）
 
-  ; 都不行，石头不能动
-  ld h, d            ; 恢复 hl 指向原石头
-  ld l, e
-  pop bc             ; 恢复计数器
-  dec hl             ; 移到前一个 tile 以继续循环
-  jp .NextTile       ; [改动 4] 距离可能过长，采用 jp 确保不越界
-
-.RockMoved:
-  ; 石头已经掉下去了，把老位置清空
-  ld h, d
-  ld l, e
-  ld a, TILE_EMPTY
-  ld [hl], a         ; [改动 4] 更新 WRAM 原位置为空
-
-  ; [改动 4] 新增：同步更新 VRAM 的老位置为空
-  push hl
-  push bc
-  ld bc, TILEMAP0 - ShadowTilemap
-  add hl, bc
-  call WriteVRAMSafe
-  pop bc
-  pop hl
-  ; [改动 4] 结束
-
-  pop bc             ; 恢复计数器
-  dec hl             ; 移到前一个 tile 以继续循环
-
-.NextTile:
-  dec bc
+.RockSkip
+  ld h,d
+  ld l,e
+  
+.skip
+  dec hl                       ; 地址 -1 → 向左移动一格（到上一行末尾）
+  dec bc                       
   ld a, b
   or c
   jp nz, .SearchRockLoop
   ret
   
-; [改动 4] 优化了 CheckRockMove，精简冗余判断并按需更新 VRAM
-CheckRockMove:        
-  ld a, [hl]
+CheckRockMove:        ;返回0就是可以移动，1就是不可以移动
+.CheckRockMoveStart
+  push de             ; 保护 OAM 指针，供移动撤销 dec [hl] 使用
+  push hl
   
-  cp TILE_EMPTY
-  jr z, .MoveAllowedAndChangeBG
+
+.Boundarydetectioncompleted
+  ;检测该格是什么，empty就继续
+  
+  ld a,[hl]
+  cp TILE_ROCK
+  jr z, .Skip
+  cp TILE_DIRT
+  jr z, .Skip
+  cp TILE_MONEY
+  jr z, .Skip
+  cp TILE_WALL
+  jr z, .Skip
   
   cp PLAYER_TILE_ID
   jr z, .Die
   
-  ; 不是空地和玩家，统统视为阻挡
-  ld a, 1            
-  ret
-
-.MoveAllowedAndChangeBG:
+  cp TILE_EMPTY
+  jr z, .MoveAllowedAndChangeBG
+  
+  jr .Skip
+  
+.MoveAllowedAndChangeBG    ;改成石头
   ld a, TILE_ROCK
-  ld [hl], a         ; [改动 4] 写入 WRAM 新位置为石头
-
-  ; [改动 4] 新增：同步更新 VRAM 新位置为石头
-  push hl
-  ld bc, TILEMAP0 - ShadowTilemap
-  add hl, bc
-  call WriteVRAMSafe
+  ld [hl],a               ; [改动 3] 现在写的是 ShadowTilemap（安全）
+  call QueueTileUpdate    ; [改动 4] 新位置变成了石头，将修改推入同步队列
   pop hl
-  ; [改动 4] 结束
-
-  xor a              ; 相当于 ld a, 0
+  pop de
+  ld a, 0
   ret
 
-.Die:
-  ld a, 1            
+
+.Skip
+  pop hl
+  pop de
+  ld a, 1
   ret
+  
+.Die
+  pop hl
+  pop de
+  
+  ret
+
   
 LoadLevel:
   ld hl, Level1Map
@@ -671,18 +773,6 @@ readKeys:
   ld    a,$30
   ldh   [rP1],a
   ret
-
-; [改动 4] 新增：安全写入 VRAM 的辅助函数
-WriteVRAMSafe:
-  push af
-.waitSTAT
-  ldh a, [rSTAT]
-  and 2             ; 检测 LCD 是否在读取 VRAM (Mode 2 或 3)
-  jr nz, .waitSTAT  ; 如果是，则等待安全周期
-  pop af
-  ld [hl], a        ; 抓准时机，安全写入
-  ret
-
 
 SECTION "Data", ROM0
 PressStr:
@@ -831,4 +921,6 @@ SECTION "Variables", WRAM0
 ShadowOAM: DS 160
 current: DS 1
 previous: DS 1
-ShadowTilemap: DS 1024       ; [改动 3] 新增：tilemap 的 WRAM 影子（1024 字节）
+ShadowTilemap: DS 1024       ; [改动 3] tilemap 的 WRAM 影子（1024 字节）
+DirtyQueueCount: DS 1        ; [改动 4] 脏区队列当前更新计数 (0~64)
+DirtyQueueData: DS 64 * 3    ; [改动 4] 脏区队列缓存，最大支持 64 次 Tile 更新，每组占据 3 字节 (VRAM H, VRAM L, TileID)
