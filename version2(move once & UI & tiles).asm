@@ -1,5 +1,24 @@
 ; Input is edge-triggered: one move per discrete d-pad press.
 ; Playfield Y bounds reserve UI_ROWS at the bottom (player cannot enter UI rows).
+; -----------------------------------------------------------------------------
+; Gameplay Rules
+; 1) Goal:
+;    - Collect all money on the current level (PRIZELEFT -> 0).
+; 2) Level flow:
+;    - Level 1 clear -> auto switch to Level 2.
+;    - Level 2 clear -> show "YOU WIN!".
+; 3) Manual level switch (current keyboard mapping):
+;    - Press A key -> next level.
+;    - Press S key -> previous level.
+;    - At Level 1, previous level returns to "PRESS ANY KEY" screen.
+;    - At last level, next level shows "THIS IS LAST LEVEL".
+; 4) Lives:
+;    - New game starts with 9 lives.
+;    - Switching levels does not reset lives.
+; 5) Death:
+;    - If crushed by rock, lose 1 life and continue from checkpoint.
+;    - If lives reach 0, show "GAME OVER".
+; -----------------------------------------------------------------------------
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
@@ -38,6 +57,10 @@ DEF LIFE_TENS_COL EQU 5
 DEF PRIZE_DIGIT_COL EQU 10
 DEF SCREEN_MODE_LEVEL EQU 0
 DEF SCREEN_MODE_OVERLAY EQU 1
+DEF LEVEL_COUNT EQU 2
+DEF START_LIVES EQU 9
+DEF KEY_A EQU %00000001
+DEF KEY_B EQU %00000010
 
 CHARMAP " ", 7          ; Space -> tile 7 (blank)
 CHARMAP "0", 9
@@ -99,35 +122,8 @@ EntryPoint:
   ld     hl, ShadowOAM
   call   ResetOAM
   call   InitializeObjects
-  call   ResetBG
-  ld hl, TILEMAP0
-  ld de, PressStr
-  ld b, PressStr.end - PressStr
-.copy:
-  ld a,[de]
-  inc de
-  ld [hl+],a
-  dec b
-  jr nz, .copy
-
-  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
-  ld [rLCDC], a
-
-
-  call WaitKey
-
-  call WaitVBlank
-  ld a, 0
-  ld [rLCDC], a
-  call   LoadLevel
-  ld a, SCREEN_MODE_LEVEL
-  ld [screenMode], a
-  call   RenderAllMapToVRAM
-  call   DrawLivesUI
-  call   DrawPrizeUI
-  call   CopyShadowOAMtoOAM
-  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
-  ld [rLCDC], a
+  call ShowPressAnyKeyScreen
+  call StartNewGame
 
 
 MainLoop:
@@ -212,6 +208,26 @@ UpdateInputs:
   ld hl,ShadowOAM       ; Player sprite position in shadow OAM.
   push hl
   call readKeys
+  ld a,[current]
+  and KEY_A
+  jr z, .checkB
+  call HandleNextLevelKey
+  pop hl
+  ret
+.checkB:
+  ld a,[current]
+  and KEY_B
+  jr z, .afterAB
+  call HandlePrevLevelKey
+  pop hl
+  ret
+.afterAB:
+  ld a,[screenMode]
+  cp SCREEN_MODE_LEVEL
+  jr z, .continueMove
+  pop hl
+  ret
+.continueMove:
   ; Build our own edge trigger from held state:
   ; newPress = held & ~lastHeld
   ; This keeps "one tile per press" behavior with better stability.
@@ -381,6 +397,31 @@ UpdateInputs:
 
 .next
   pop hl
+  ret
+
+HandlePrevLevelKey:
+  ld a,[currentLevel]
+  and a
+  jr z,.toTitle
+  dec a
+  ld [currentLevel],a
+  call TransitionToCurrentLevel
+  ret
+.toTitle:
+  call ShowPressAnyKeyScreen
+  call StartNewGame
+  ret
+
+HandleNextLevelKey:
+  ld a,[currentLevel]
+  cp LEVEL_COUNT - 1
+  jr nc,.lastLevel
+  inc a
+  ld [currentLevel],a
+  call TransitionToCurrentLevel
+  ret
+.lastLevel:
+  call ShowLastLevelNotice
   ret
 
 ; Output: B=row, C=col for the player's current tile.
@@ -723,8 +764,8 @@ CheckMove:
   ret
 
 CountMoneyInLevel:
-  ld hl, Level1Map
-  ld bc, LEVEL_SIZE
+  call GetCurrentLevelMapPtr
+  ld bc, GAME_MAP_SIZE
   ld d, 0
 .loop:
   ld a, [hl+]
@@ -1030,6 +1071,14 @@ HandleWinCondition:
   ld a, [prizeLeft]
   and a
   ret nz
+  ld a,[currentLevel]
+  cp LEVEL_COUNT - 1
+  jr z,.win
+  inc a
+  ld [currentLevel],a
+  call TransitionToCurrentLevel
+  ret
+.win:
   jp WinScreen
 
 WinScreen:
@@ -1085,15 +1134,13 @@ DrawLivesUI:
 
 LoadLevel:
   call CountMoneyInLevel
-  ld a, 10
-  ld [livesLeft], a
   xor a
   ld [playerDead], a
   ld [dpadLatch], a
   ld [dirtyCount], a
   ld [rockWaitValid], a
   ld [priorityDirtyValid], a
-  ld hl, Level1Map
+  call GetCurrentLevelMapPtr
   ld de, GameMap
   xor a
   ld b, a
@@ -1131,6 +1178,94 @@ LoadLevel:
   cp PLAY_ROWS
   jr nz, .row
   call SaveCheckpointState
+  ret
+
+GetCurrentLevelMapPtr:
+  ld a,[currentLevel]
+  add a
+  ld c,a
+  ld b,0
+  ld hl,LevelMapPtrs
+  add hl,bc
+  ld a,[hli]
+  ld h,[hl]
+  ld l,a
+  ret
+
+TransitionToCurrentLevel:
+  call WaitVBlankIfLCDOn
+  xor a
+  ld [rLCDC],a
+  call LoadLevel
+  ld a, SCREEN_MODE_LEVEL
+  ld [screenMode], a
+  call RenderAllMapToVRAM
+  call DrawLivesUI
+  call DrawPrizeUI
+  call CopyShadowOAMtoOAM
+  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+  ret
+
+ShowPressAnyKeyScreen:
+  ld a, SCREEN_MODE_OVERLAY
+  ld [screenMode], a
+  call WaitVBlankIfLCDOn
+  xor a
+  ld [rLCDC],a
+  call ResetBG
+  ld hl, TILEMAP0 + (8 * MAP_STRIDE) + 3
+  ld de, PressStr
+  ld b, PressStr.end - PressStr
+.copyPress:
+  ld a,[de]
+  inc de
+  ld [hl+],a
+  dec b
+  jr nz, .copyPress
+  ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+  call WaitKey
+  ret
+
+ShowLastLevelNotice:
+  ld a, SCREEN_MODE_OVERLAY
+  ld [screenMode], a
+  call WaitVBlankIfLCDOn
+  xor a
+  ld [rLCDC],a
+  call ResetBG
+  ld hl, TILEMAP0 + (8 * MAP_STRIDE) + 1
+  ld de, LastLevelStr
+  ld b, LastLevelStr.end - LastLevelStr
+.copyLast:
+  ld a,[de]
+  inc de
+  ld [hl+],a
+  dec b
+  jr nz, .copyLast
+  ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+  call WaitKey
+  call WaitVBlank
+  xor a
+  ld [rLCDC],a
+  ld a, SCREEN_MODE_LEVEL
+  ld [screenMode], a
+  call RenderAllMapToVRAM
+  call DrawLivesUI
+  call DrawPrizeUI
+  call CopyShadowOAMtoOAM
+  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+  ret
+
+StartNewGame:
+  xor a
+  ld [currentLevel],a
+  ld a, START_LIVES
+  ld [livesLeft],a
+  call TransitionToCurrentLevel
   ret
 
 ; Draw all queued map changes plus UI and OAM during VBlank.
@@ -1248,6 +1383,12 @@ WaitVBlank:
   jr nz, WaitVBlank
   ret
 
+WaitVBlankIfLCDOn:
+  ld a, [rLCDC]
+  and LCDC_ON
+  ret z
+  jp WaitVBlank
+
 ResetOAM:
   ld b,40*4
   ld a,0
@@ -1309,6 +1450,10 @@ PressStr:
   DB "PRESS ANY KEY"
 .end
 
+LastLevelStr:
+  DB "THIS IS LAST LEVEL"
+.end
+
 PrizeUiLine:
   DB "PRIZELEFT "
 .end
@@ -1361,6 +1506,29 @@ Level1Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
   DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
   DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level2Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,6,5,5,5,0,0,1,5,5,5,3,5,1,0,0,5,5,3,4
+  DB 4,5,4,4,5,5,4,0,5,4,5,0,4,1,5,4,4,4,5,4
+  DB 4,5,5,4,5,0,4,0,3,4,3,0,4,0,5,4,5,5,5,4
+  DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,5,4,5,4
+  DB 4,0,5,5,5,5,5,4,1,1,1,4,5,5,5,5,5,4,5,4
+  DB 4,0,4,4,4,4,5,4,3,0,0,4,5,4,4,4,5,4,5,4
+  DB 4,0,5,3,5,4,5,5,5,0,5,5,5,4,5,3,5,5,5,4
+  DB 4,0,5,4,5,4,4,4,5,0,5,4,4,4,5,4,4,4,5,4
+  DB 4,0,5,4,5,5,5,4,5,0,5,4,5,5,5,4,5,5,5,4
+  DB 4,0,5,4,4,4,5,4,5,0,5,4,5,4,4,4,5,4,5,4
+  DB 4,0,5,5,5,4,5,4,5,0,5,4,5,4,3,5,5,4,5,4
+  DB 4,0,4,4,5,4,5,4,5,0,5,4,5,4,1,4,4,4,5,4
+  DB 4,0,5,4,5,5,5,5,5,0,5,5,5,4,1,5,5,5,5,4
+  DB 4,0,5,4,4,4,4,4,5,0,5,4,4,4,1,4,4,4,3,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+LevelMapPtrs:
+  DW Level1Map, Level2Map
 
 
 Tiles:
@@ -1504,4 +1672,5 @@ rockWaitRow: DS 1
 rockWaitCol: DS 1
 rocksMovedThisPass: DS 1
 screenMode: DS 1
+currentLevel: DS 1
 GameMap: DS GAME_MAP_SIZE
