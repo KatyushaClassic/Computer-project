@@ -1,34 +1,33 @@
-; [改动 1] UpdateInputs: readKeys 后用 c（边沿），不用 b（按住）→ 每按一次方向键只走一格
-; [改动 2] CheckMove Y 上界 + 下列常量 → 底部 UI_ROWS 行留给 UI，笑脸不可进入
-; [改动 3] 所有 tilemap 读写改为 WRAM 影子地图 (ShadowTilemap)，仅在 VBlank 同步到 VRAM
-; [改动 4] 增加脏区，改善vblank
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
 DEF PLAYER_TILE_ID EQU 2
+DEF LEVEL_AMMOUNT EQU 2
 
-; [改动 2] 底部 2 行 UI 预留（见 PLAY_Y_MAX）
-DEF SCR_H        EQU 144
-DEF UI_ROWS      EQU 2
-DEF TILE_PX      EQU 8
-DEF SPRITE_PX    EQU 8
-DEF OAM_Y_BIAS   EQU 16
-DEF OAM_X_BIAS   EQU 8
-DEF PLAY_Y_MAX   EQU SCR_H - (UI_ROWS * TILE_PX) - SPRITE_PX + OAM_Y_BIAS
-DEF PLAY_Y_MIN   EQU OAM_Y_BIAS
+; 底部 2 行 UI 预留（见 PLAY_Y_MAX）
+DEF SCR_H         EQU 144
+DEF UI_ROWS       EQU 2
+DEF TILE_PX       EQU 8
+DEF SPRITE_PX     EQU 8
+DEF OAM_Y_BIAS    EQU 16
+DEF OAM_X_BIAS    EQU 8
+DEF PLAY_Y_MAX    EQU SCR_H - (UI_ROWS * TILE_PX) - SPRITE_PX + OAM_Y_BIAS
+DEF PLAY_Y_MIN    EQU OAM_Y_BIAS
 
-DEF LEVEL_W      EQU 32
-DEF LEVEL_H      EQU 18
-DEF LEVEL_SIZE   EQU LEVEL_W * LEVEL_H
+DEF MAP_W         EQU 20
+DEF MAP_H         EQU 18
+DEF MAP_SIZE      EQU MAP_W * MAP_H
+DEF SCR_STRIDE    EQU 32  ; Tilemap 换行步长固定为 32
 
-DEF TILE_DIRT    EQU 0
-DEF TILE_ROCK    EQU 1
-DEF TILE_MONEY   EQU 3
-DEF TILE_WALL    EQU 4
-DEF TILE_EMPTY   EQU 5
-DEF TILE_START   EQU 6
-DEF TILE_UI      EQU 7
-DEF PLAY_ROWS    EQU LEVEL_H - UI_ROWS
+DEF TILE_DIRT     EQU 0
+DEF TILE_ROCK     EQU 1
+DEF TILE_MONEY    EQU 3
+DEF TILE_WALL     EQU 4
+DEF TILE_EMPTY    EQU 5
+DEF TILE_START    EQU 6
+DEF TILE_UI       EQU 7
+DEF TILE_BARRIER  EQU 8 
+DEF PLAY_ROWS     EQU MAP_H - UI_ROWS
 
 CHARMAP " ", 7          ; 空格 → tile 7 (blank)
 CHARMAP "A", 19         ; A → tile 19
@@ -63,14 +62,15 @@ SECTION "Header", ROM0[$100]
 
   ds $150 - @, 0
 
-; =========================================================
-; 游戏主入口（GAME OVER 后重新按键会重置到这里）
-; =========================================================
 EntryPoint:
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
   
+  ; 游戏彻底开始时，初始化当前关卡为关卡 1 (索引为 0)
+  xor a
+  ld [CurrentLevel], a
+
   ld a, 3                     ; 初始化生命值
   ld [PlayerLives], a
 
@@ -109,20 +109,17 @@ EntryPoint:
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  call WaitKey
+  call WaitActionKey
   
-; =========================================================
 ; 初始化关卡
-; =========================================================
 InitLevelState:               ; 初始化关卡里的数据
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
   call   LoadLevel            ; 加载地图到 ShadowTilemap
 
-  ; 绘制底部 UI 标签区
   ;Money
-  ld hl, ShadowTilemap + 16 * 32 + 2
+  ld hl, ShadowTilemap + 17 * 32 + 2
   ld de, MoneyLabelStr
   ld b, 5
 .drawMoneyStr:
@@ -133,7 +130,7 @@ InitLevelState:               ; 初始化关卡里的数据
   jr nz, .drawMoneyStr
   
   ;HP
-  ld hl, ShadowTilemap + 16 * 32 + 11 
+  ld hl, ShadowTilemap + 17 * 32 + 11 
   ld de, HPLabelStr
   ld b, 2
 .drawHPStr:
@@ -156,11 +153,14 @@ InitLevelState:               ; 初始化关卡里的数据
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-; =========================================================
-; 关卡内主循环
-; =========================================================
 MainLoop:
   call UpdateInputs           ;识别玩家输入并移动玩家
+  
+  ; 每帧检测金币是否全部吃完，若归零则进入胜利切关流程
+  ld a, [prizeLeft]
+  and a
+  jp z, TriggerYouWin
+
   call RockCheck              ;石头重力检测
   call CheckPlayerDeath       ;玩家死亡检测
   call WaitVBlank
@@ -170,10 +170,6 @@ MainLoop:
 
 
 SECTION "Functions", ROM0
-
-; =========================================================
-; 功能性函数
-; =========================================================
 
 ; 响应任意按键的暂停挂起函数
 ; 实现：通过死循环
@@ -310,9 +306,9 @@ QueueTileUpdate:
   add hl, bc
   ld d, h
   ld e, l               
-  
+ 
 ; 约定:一条目3字节：VRAM高位, VRAM低位, TileID
-;bc = a:记录队列总条目数  
+; bc = a:记录队列总条目数  
   ld a, [DirtyQueueCount]
   ld c, a
   ld b, 0
@@ -355,7 +351,7 @@ ProcessDirtyQueue:
   inc hl
   ld a, [hl]                 
   inc hl
-  
+ 
 ;de表示写入地址，a表示写入的tile
   ld [de], a                 
   dec b
@@ -366,9 +362,6 @@ ProcessDirtyQueue:
   ld [DirtyQueueCount], a    
   ret
 
-; =========================================================
-; 功能性函数
-; =========================================================
 UpdateInputs:            ;识别玩家输入并移动玩家
   ld hl,ShadowOAM        ;人物素材坐标
   push hl
@@ -385,7 +378,6 @@ UpdateInputs:            ;识别玩家输入并移动玩家
   jr nz, .moveDown
   jp .next
 
-; a=1:Y   a=0:X
 .moveDown
   inc [hl]
   inc [hl]
@@ -399,9 +391,9 @@ UpdateInputs:            ;识别玩家输入并移动玩家
   ld a,1             
   call CheckMove
   cp 1
-  jp nz,.next    ; 如果走通了，CheckMove 内部已经处理了保护状态，直接结束
+  jp nz,.next             ; 如果走通了，CheckMove 内部已经处理了保护状态，直接结束
   
-  dec [hl]       ; 没走通，撤销坐标
+  dec [hl]                ; 没走通，撤销坐标
   dec [hl]
   dec [hl]
   dec [hl]
@@ -441,21 +433,17 @@ UpdateInputs:            ;识别玩家输入并移动玩家
   cp TILE_EMPTY
   jr nz,.LeftCantMove
 
-;为空，把这个格改成石头  
+;为空，把这个格改成石头
   ld a,TILE_ROCK
   ld [hl],a
   call QueueTileUpdate
 
-;把上一格改为空  
+;把上一格改为空 
   inc hl
   ld a,TILE_EMPTY
   ld [hl],a
   call QueueTileUpdate
   
-;成功移动，取消保护
-  xor a
-  ld [RockSuspendedH], a
-  ld [RockSuspendedL], a
   jr .next
   
 .LeftCantMove
@@ -532,11 +520,7 @@ UpdateInputs:            ;识别玩家输入并移动玩家
   ld a,TILE_EMPTY
   ld [hl],a
   call QueueTileUpdate
-  
-  ; [改动 10] 推石头属于有效操作，清空悬空锁！
-  xor a
-  ld [RockSuspendedH], a
-  ld [RockSuspendedL], a
+ 
   jr .next
   
 .RightCantMove
@@ -572,15 +556,14 @@ CheckMove:
   
 .XCoordinate
   ld a,[hl]
-  cp 160+4
+  cp 160+4                         ;PLAY_X_MAX
   jp nc,.WithdrawMove
-  cp 8
+  cp 8                             ;PLAY_X_MIN
   jp c,.WithdrawMove
   
 .Boundarydetectioncompleted
-  ; 【核心优化】直接调用已有函数获取尝试移动后玩家在 ShadowTilemap 中的绝对地址
-  call CountPlayerTileAddress  ; 返回的 hl 即为绝对内存地址
-  ld a, [hl]                  ; 直接读取该格子的 Tile ID
+  call CountPlayerTileAddress  
+  ld a, [hl]                  
   
   cp TILE_EMPTY
   jr z, .MoveAllowed
@@ -592,7 +575,7 @@ CheckMove:
   jr z, .MoveAllowedAndChangeBG
   jr .WithdrawMove
   
-.MoveAllowed   ;走到空地属于有效移动,取消保护
+.MoveAllowed   
   xor a
   ld [RockSuspendedH], a
   ld [RockSuspendedL], a
@@ -602,29 +585,29 @@ CheckMove:
   ret
   
 .MoveAllowedAndChangeBG    
-  ;挖泥土/吃金币属于有效移动,取消保护
   xor a
   ld [RockSuspendedH], a
   ld [RockSuspendedL], a
 
-  ; 然后检查是否需要设立【新】的悬空锁（也就是头顶有没有石头）
-  push hl                 ; 压栈保存当前格子的绝对地址
+
+; 然后检查是否需要设立【新】的悬空锁（也就是头顶有没有石头）
+  push hl                 
   ld de, -32
-  add hl, de              ; 绝对地址可以直接 -32 指向正上方格子
+  add hl, de                   ; hl 现在是正上方格子的索引
   ld a, [hl]
   cp TILE_ROCK
   jr nz, .noRockAbove
   
-  ; 上方确实有石头，进行保护
+; 上方确实有石头！记录这块石头的内存地址赋予保护！
   ld a, h
   ld [RockSuspendedH], a
   ld a, l
   ld [RockSuspendedL], a
 .noRockAbove:
-  pop hl                  ; 恢复 hl 为当前挖掘点的绝对地址
+  pop hl                  
   
   ; 收集金币与挖掘泥土逻辑
-  ld a, [hl]              ; 判断是否金币
+  ld a, [hl]              
   cp TILE_MONEY
   jr nz, .notMoneyCollected
   ld a, [prizeLeft]       
@@ -633,14 +616,14 @@ CheckMove:
   dec a                    
   ld [prizeLeft], a
   push hl
-  call UpdatePrizeDigit   ; 更新金币数
+  call UpdatePrizeDigit   
   pop hl
 .notMoneyCollected:
   ld a, TILE_EMPTY
-  ld [hl], a              ; 将当前地址改为空地
-  call QueueTileUpdate    ; 脏区队列同样接收绝对地址 hl
+  ld [hl], a              
+  call QueueTileUpdate    
   
-  pop hl                  ; 弹出最开始 push 的 ShadowOAM 坐标指针
+  pop hl                  
   ld a, 0
   ret
 
@@ -657,59 +640,62 @@ RockCheck:
   ld a, [hl]                   
   cp TILE_ROCK       
   jp nz, .skip
-.MoveRock
 
-  ; 检测正在扫描的这块石头，是否处于被玩家挖掘保护的状态
+; 检测正在扫描的这块石头，是否处于被玩家挖掘保护的状态
+.MoveRock
   ld a, [RockSuspendedH]
   cp h
   jr nz, .NotSuspended
   ld a, [RockSuspendedL]
   cp l
   jr nz, .NotSuspended
-  ; 如果地址完全一致，说明这正是悬空的石头
   jp .skip
   
 .NotSuspended:
-  ; 如果没被保护，执行正常重力扫描
+; 如果没被保护，执行正常重力扫描。设x = 当前位置
   ld   d,h          
   ld   e,l
   ld   a,l
-  add  LEVEL_W                    ;+32
+  add  SCR_STRIDE                 ;x+32
   ld   l, a
   ld   a, h
-  adc  0                          ;处理进位
-  ld   h, a                       ;hl 现在是正下方的地址
+  adc  0                          
+  ld   h, a                       ; hl 现在是正下方的地址
   
   call CheckRockMove
   cp 1
   jr z,.CheckMoveRight
   
-;将石头这格设为空（此时已经可以移动）
   ld h,d
   ld l,e
   ld a,TILE_EMPTY
   ld [hl],a
   call QueueTileUpdate       
-  jr .RockSkip
+  jp .RockSkip
   
-.CheckMoveRight
-;下方是石头才进行左右检测
+.CheckMoveRight                   ;x+32
+;必须下面是石头才能滑动
   ld a,[hl]
   cp TILE_ROCK
-  jr nz,.RockSkip
+  jp nz,.RockSkip
   
+;检测左边  
 .ContinueCheckMoveRight
-;检测向左下移动是否可以（不清楚先左还是右,无需检测玩家死亡）
-;往上再往左,检测左边
-; -1-32
-  dec hl
+  ;如果在第 0 列，强行关闭左滑功能
+  ;如何实现：取地址除以32的余数
+  ld a, e                         ; 不需要理会高8位，因为除以32得到的余数只有后5位
+  sub LOW(ShadowTilemap)          ; 因为当前de地址 = ShadowTilemap + Tile地址
+  and 31                          ;and 00011111 = 保留后5位，得到余数
+  jr z, .SkipLeftSlide            ; 此时x+32，余数为0处于最左边界，直接去处理右侧滑落准备
+
+  dec hl                          ;x+31
   
   ld   a,l           
-  sub  LEVEL_W 
+  sub  SCR_STRIDE                 
   ld   l, a
   ld   a, h
   sbc  0               
-  ld   h, a
+  ld   h, a                       ;x-1
  
   ld a,[hl]
   cp TILE_ROCK
@@ -721,39 +707,46 @@ RockCheck:
   cp TILE_WALL
   jr z, .CheckMoveLeft
   
-;检测左下    
-  ld   a,l               ;+32
-  add  LEVEL_W 
+;左边为空，检测左下边
+  ld   a,l                                
+  add  SCR_STRIDE 
   ld   l, a
   ld   a, h
   adc  0               
-  ld   h, a   
+  ld   h, a                       ;x-33
   
   call CheckRockMove
-  cp TILE_ROCK
+  cp 1
   jr z,.ReturnHL
   
-;将石头这格设为空（此时已经可以移动）
   ld h,d
   ld l,e
   ld a,TILE_EMPTY
   ld [hl],a
   call QueueTileUpdate       
   jr .RockSkip
-  
-.ReturnHL                ;检测左下时+32了，用于恢复
-  ld   a,l               ;-32
-  sub  LEVEL_W 
+
+.ReturnHL                         ;到了x-33，要+32变成x-1
+  ld   a,l               
+  sub  SCR_STRIDE 
   ld   l, a
   ld   a, h
   sbc  0               
   ld   h, a 
-  
+
+;检测右边                         ;x-1
 .CheckMoveLeft
-  inc hl                 ;+2
-  inc hl
+  inc hl                 
+  inc hl                          ;x+1
   
-  ld a,[hl]              ;检测右边
+;如果在第 19 列，强行关闭右滑功能
+  ld a, e
+  sub LOW(ShadowTilemap)
+  and 31
+  cp 19                           ; 余数为19
+  jr z, .RockSkip                 ; 处于最右边界，直接放弃右滑
+
+  ld a,[hl]              ; 检测右边
   cp TILE_ROCK
   jr z, .RockSkip
   cp TILE_DIRT
@@ -761,29 +754,40 @@ RockCheck:
   cp TILE_MONEY
   jr z, .RockSkip
   cp TILE_WALL
-  jr z, .RockSkip
+  jr z, .RockSkip                 ;x+1
   
-  ld   a,l               ;检测右下角
-  add  LEVEL_W 
+;检测右下边
+  ld   a,l               
+  add  SCR_STRIDE 
   ld   l, a
   ld   a, h
   adc  0               
-  ld   h, a   
+  ld   h, a                       ;x-31
   
   call CheckRockMove
   cp 1
   jr z,.RockSkip
+
   ld h,d
   ld l,e
   ld a,TILE_EMPTY
   ld [hl],a
   call QueueTileUpdate       
   jr .RockSkip               
-  
-.RockSkip                ;用于复原hl
+
+.SkipLeftSlide                    ;x-32
+  ld a, l
+  sub 33
+  ld l, a
+  ld a, h
+  sbc 0
+  ld h, a                         ;x-1
+  jr .CheckMoveLeft
+
+.RockSkip                         ;用于返回hl值
   ld h,d
   ld l,e
-.skip
+.skip                             ;因为de值可能乱掉，所以分开
   dec hl                        
   dec bc                        
   ld a, b
@@ -791,7 +795,7 @@ RockCheck:
   jp nz, .SearchRockLoop
   ret
   
-CheckRockMove:            ;移动石头并推入脏队列
+CheckRockMove:            
 .CheckRockMoveStart
   push de              
   push hl
@@ -823,7 +827,7 @@ CheckRockMove:            ;移动石头并推入脏队列
   ld a, 1
   ret
   
-CountPlayerTileAddress:   ;计算玩家位置
+CountPlayerTileAddress:   
   push bc
   push de
   
@@ -856,27 +860,24 @@ CountPlayerTileAddress:   ;计算玩家位置
   ld d, 0
   add hl, de
   ld de, ShadowTilemap
-  add hl, de         ; 此时 hl 指向玩家当前所在的 Tile 地址
+  add hl, de         
   pop de
   pop bc
   ret
   
-; =========================================================
-; 彻底解耦的全屏重置逻辑
-; =========================================================
 CheckPlayerDeath:
   call CountPlayerTileAddress
 
   ld a, [hl]
   cp TILE_ROCK
-  ret nz             ; 如果没有被石头砸，直接返回
+  ret nz                 ; 如果没有被石头砸，直接返回
 
-  ; 玩家被砸中
-  ; 1. 在 ShadowTilemap 里复原被砸毁的格子（旧位置变空，上方变石头）
+; 玩家被砸中
+; 在 ShadowTilemap 里复原被砸毁的格子（旧位置变空，上方变石头）
   ld a, TILE_EMPTY
   ld [hl], a
   ld a, l
-  sub LEVEL_W
+  sub SCR_STRIDE                     
   ld l, a
   ld a, h
   sbc 0
@@ -884,13 +885,13 @@ CheckPlayerDeath:
   ld a, TILE_ROCK
   ld [hl], a
 
-  ; 2. 扣减生命值并更新 UI
+; 扣减生命值并更新 UI
   ld a, [PlayerLives]
   dec a
   ld [PlayerLives], a
   call UpdateHPDigit
-
-  ; 3. 判断是否彻底死亡
+  
+;判断是否彻底死亡
   ld a, [PlayerLives]
   and a
   jr z, .TriggerGameOver 
@@ -899,25 +900,25 @@ CheckPlayerDeath:
   call CopyShadowOAMtoOAM
   call ProcessDirtyQueue
 
-  ; --------- 情况 A: YOU ARE DEAD (全屏清空) ---------
-  ; 安全关闭屏幕
+; 情况 A: YOU ARE DEAD (全屏清空)
+; 安全关闭屏幕
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
-
-  ; 将 VRAM 显显存完全清空为空地
+  
+; 将 VRAM 显存完全清空为空地
   ld hl, TILEMAP0
   ld bc, 1024
 .clearVRAM1:
-  ld a, TILE_EMPTY            ; 防止 a 寄存器在循环内被污染导致乱码
+  ld a, TILE_EMPTY            
   ld [hl+], a
   dec bc
   ld a, b
   or c
   jr nz, .clearVRAM1
 
-  ; 在屏幕正中间写入 YOU ARE DEAD
-  ld hl, TILEMAP0 + 8 * 32 + 4  ; X=(20-12)/2=4
+; 在屏幕正中间写入 YOU ARE DEAD
+  ld hl, TILEMAP0 + 8 * 32 + 4  
   ld de, YouAreDeadStr
   ld b, 12
 .drawDeadText:
@@ -926,57 +927,55 @@ CheckPlayerDeath:
   ld [hl+], a
   dec b
   jr nz, .drawDeadText
+  
 
-  ; 开启屏幕，隐藏精灵
+; 开启屏幕，隐藏精灵
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  ; 冻结等待玩家功能键确认 (A/B/Select/Start)
   call WaitActionKey           
 
-  ; 返回地图：再次安全关闭屏幕
+; 返回地图：再次安全关闭屏幕
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
 
-  ; 将完好无损的 ShadowTilemap (含修复好的石头和血量) 完整倒回 VRAM
+; 将完好无损的 ShadowTilemap (含修复好的石头和血量) 完整倒回 VRAM
   call CopyShadowTilemapToVRAM
   
-  ; 清除期间可能产生的残留脏区队列
+; 清除期间可能产生的残留脏区队列
   xor a
   ld [DirtyQueueCount], a
 
-  ; 重新开启屏幕，并恢复精灵渲染，此时显示的是地图画面
+; 重新开启屏幕，并恢复精灵渲染，此时显示的是地图画面
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
   
-  ; 玩家在地图上原地冻结，保留普通 WaitKey！
   call WaitKey
   
   ret
 
-; --------- 情况 B: GAME OVER (完全重置) ---------
+;GAME OVER
 .TriggerGameOver:
-  ; 安全关闭屏幕
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
 
-  ; 清空 VRAM
   ld hl, TILEMAP0
   ld bc, 1024
+  
 .clearVRAM2:
-  ld a, TILE_EMPTY            ; 【核心修复】防止乱码
+  ld a, TILE_EMPTY            
   ld [hl+], a
   dec bc
   ld a, b
   or c
   jr nz, .clearVRAM2
 
-  ; 写入 GAME OVER
-  ld hl, TILEMAP0 + 8 * 32 + 5  ; X=(20-9)/2=5.5 向下取整为 5，完美居中
+  ld hl, TILEMAP0 + 8 * 32 + 5  
   ld de, GameOverStr
   ld b, 9
+  
 .drawGameOverText:
   ld a, [de]
   inc de
@@ -984,65 +983,77 @@ CheckPlayerDeath:
   dec b
   jr nz, .drawGameOverText
 
-  ; 开启屏幕，关闭精灵渲染
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
 .halt:
   jr .halt
 
-
 LoadLevel:
-  ld hl, Level1Map            ;关卡地图的 ROM 地址
-  ld de, ShadowTilemap        ;WRAM 中的影子地图起始地址
+  call GetLevelMapAddress     
+  ld de, ShadowTilemap        
   xor a
-  ld b, a                     ;b 行计数器
+  ld b, a                    
 
-;新的一列
 .row:
   xor a
-  ld c, a                     ;c 列计数器
+  ld c, a                 ;c = 列计数器 <= 19   
   
-;新的一行
 .col:
   ld a, [hl+]
   cp TILE_START
   jr nz, .writeTile
-  
-;遇到玩家出生点，记录出生坐标到 ShadowOAM
-;X = col*8 + 8，Y = row*8 + 16
+ 
+; 设置出生点
   push bc
+  
+; 计算并设置玩家的 X 坐标
   ld a, c
   add a
   add a
   add a
   add 8
-  ld [ShadowOAM + 1], a
+  ld [ShadowOAM + 1], a   ;x = row*8 + 8
+  
+; 计算并设置玩家的 Y 坐标
   ld a, b
   add a
   add a
   add a
   add OAM_Y_BIAS
-  ld [ShadowOAM], a
+  ld [ShadowOAM], a       ;y = col*8 + 16
+  
   pop bc
   ld a, TILE_EMPTY
   
+;写入
 .writeTile:
   ld [de], a
   inc de
-  inc c
+  inc c                   ;递增列
   ld a, c
-  cp LEVEL_W
+  cp MAP_W                    
   jr nz, .col
+
+  push bc
+  ld b, SCR_STRIDE - MAP_W;b = 32 -20 =12
+;行尾填充UI
+.padLoop:
+  ld a, TILE_UI
+  ld [de], a
+  inc de
+  dec b
+  jr nz, .padLoop
+  pop bc
   
-  inc b
+  inc b                   ;递增行
   ld a, b
-  cp LEVEL_H
+  cp MAP_H                    
   jr nz, .row
 
-; 填充 ShadowTilemap 中剩余部分（即 LEVEL_SIZE 之后到 1024 字节）
-  ld hl, ShadowTilemap + LEVEL_SIZE  
-  ld bc, 1024 - LEVEL_SIZE
+  ld hl, ShadowTilemap + (MAP_H * SCR_STRIDE)    ; hl = ShadowTilemap + (18 * 32) = 第 18 行的起始地址
+  ld bc, 1024 - (MAP_H * SCR_STRIDE)             ; bc = 1024 - 576 = 448 字节，即剩下的 14 行 × 32 列
+  
 .fillRest:
   ld a, TILE_EMPTY
   ld [hl+], a
@@ -1052,9 +1063,9 @@ LoadLevel:
   jr nz, .fillRest
   ret
 
-CountMoneyInLevel:           ;遍历地图，数钱
-  ld hl, Level1Map
-  ld bc, LEVEL_SIZE
+CountMoneyInLevel:           
+  call GetLevelMapAddress     
+  ld bc, MAP_SIZE            
   ld d, 0
 .countLoop:
   ld a, [hl+]
@@ -1070,18 +1081,79 @@ CountMoneyInLevel:           ;遍历地图，数钱
   ld [prizeLeft], a          
   ret
 
+;hl = 下一个地图地址
+GetLevelMapAddress:
+  ld a, [CurrentLevel]     ;a = CurrentLevel
+  add a                    ;a = CurrentLevel*2   
+  ld e, a
+  ld d, 0                  ;de = a
+  ld hl, LevelPointers     
+  add hl, de               ;hl = LevelPointersAddress + CurrentLevel*2  
+  
+  ld a, [hl+]              ;读入低字节
+  ld h, [hl]               ;读入高字节
+  ld l, a                    
+  ret
+
+TriggerYouWin:
+  call WaitVBlank
+  ld a, 0
+  ld [rLCDC], a
+
+  ld hl, TILEMAP0
+  ld bc, 1024
+.clearVRAMWin:
+  ld a, TILE_EMPTY           
+  ld [hl+], a
+  dec bc
+  ld a, b
+  or c
+  jr nz, .clearVRAMWin
+
+  ld hl, TILEMAP0 + 8 * 32 + 6  
+  ld de, YouWinStr
+  ld b, 7                       
+.drawWinText:
+  ld a, [de]
+  inc de
+  ld [hl+], a
+  dec b
+  jr nz, .drawWinText
+
+  ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
+
+  call WaitActionKey           
+
+  ld a, [CurrentLevel]      ;进入下一关
+  inc a
+  cp LEVEL_AMMOUNT          ;看看有没有打到最后        
+  jr nz, .saveNext
+  
+;最后一关已完成
+.DeadLoop
+  jr .DeadLoop
+  
+;进入下一关  
+.saveNext:
+  ld [CurrentLevel], a
+
+  jp InitLevelState
+
+;Show Money
 UpdatePrizeDigit:
   ld a, [prizeLeft]
-  add a, 9                      ;变成数字
-  ld hl, ShadowTilemap + 16 * 32 + 8 
+  add a, 9                      
+  ld hl, ShadowTilemap + 17 * 32 + 8 
   ld [hl], a
   call QueueTileUpdate       
   ret
 
+;Show HP
 UpdateHPDigit:
   ld a, [PlayerLives]
   add a, 9                    
-  ld hl, ShadowTilemap + 16 * 32 + 14 
+  ld hl, ShadowTilemap + 17 * 32 + 14 
   ld [hl], a
   call QueueTileUpdate
   ret
@@ -1159,26 +1231,52 @@ YouAreDeadStr:
   DB "YOU ARE DEAD"
 GameOverStr:
   DB "GAME OVER"
+YouWinStr:
+  DB "YOU WIN"
+
+LevelPointers:      ;存放地图地址
+  DW Level1Map
+  DW Level2Map
 
 Level1Map:
-  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,1,5,5,5,5,5,5,5,5,1,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,1,1,1,5,5,5,5,5,5,5,5,5,5,5,5,1,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,0,0,0,5,5,5,5,5,5,5,5,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,3,3,5,5,5,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,3,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,0,1,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,0,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,5,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,1,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+  DB 0,6,0,0,0,1,0,3,0,4,0,3,0,1,0,0,0,0,0,0
+  DB 0,0,4,4,0,0,4,0,0,4,0,0,4,1,0,4,0,4,0,0
+  DB 0,0,0,4,0,0,4,0,3,4,3,0,4,0,0,4,0,0,0,0
+  DB 0,0,0,4,4,0,4,4,0,4,0,4,4,0,4,4,0,4,0,0
+  DB 0,0,0,0,0,0,0,4,1,1,1,4,0,0,0,0,0,4,0,0
+  DB 0,0,4,4,4,4,0,4,3,0,0,4,0,4,0,4,0,4,0,0
+  DB 0,0,0,3,0,4,0,0,0,0,0,0,0,4,0,3,0,0,0,0
+  DB 0,0,0,4,0,4,4,4,0,0,0,4,4,4,0,4,4,4,0,0
+  DB 0,0,0,4,0,0,0,4,0,0,0,4,0,0,0,4,0,0,0,0
+  DB 0,0,0,4,4,4,0,4,0,0,0,4,0,4,4,4,0,4,0,0
+  DB 0,0,0,0,0,4,0,4,0,0,0,4,0,4,3,0,0,4,0,0
+  DB 0,0,4,4,0,4,0,4,0,0,0,4,0,4,1,4,4,4,0,0
+  DB 0,0,0,4,0,0,0,0,0,0,0,0,0,4,1,0,0,0,0,0
+  DB 0,0,0,4,4,4,4,4,0,0,0,4,4,4,1,4,4,4,3,0
+  DB 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level2Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,6,0,0,4,0,0,0,3,4,0,0,0,3,4,0,0,1,0,4
+  DB 4,0,0,0,4,0,1,0,0,4,0,1,0,0,4,0,0,0,0,4
+  DB 4,0,1,0,4,0,0,0,0,0,0,0,0,0,4,0,0,3,0,4
+  DB 4,0,0,0,4,4,4,0,4,4,4,0,4,4,4,0,0,0,0,4
+  DB 4,3,0,0,0,0,4,0,0,0,0,0,4,0,0,0,0,0,1,4
+  DB 4,0,0,0,0,0,4,0,1,0,3,0,4,0,1,0,0,0,0,4
+  DB 4,0,1,0,0,0,4,0,0,0,0,0,4,0,0,0,0,3,0,4
+  DB 4,0,0,0,0,0,4,4,4,0,4,4,4,0,0,0,1,0,0,4
+  DB 4,0,0,0,1,0,0,0,0,0,0,0,0,0,0,4,0,0,0,4
+  DB 4,4,4,0,0,0,4,0,0,0,1,0,4,0,0,4,0,0,0,4
+  DB 4,0,0,0,0,0,4,0,1,0,0,0,4,0,0,4,0,0,0,4
+  DB 4,0,1,0,0,0,0,0,0,0,0,0,4,0,0,4,0,1,0,4
+  DB 4,0,0,0,0,4,4,4,0,4,4,4,4,0,0,4,0,0,0,4
+  DB 4,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Tiles:
 ;0 = Dirt
@@ -1197,7 +1295,7 @@ Tiles:
  DB %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
 ;7 = Blank
  DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
-;8
+;8 = Invisible Barrier 
  DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
 ; font characters
   DB $00,$3C,$66,$66,$66,$66,$3C,$00 ; 0
@@ -1245,8 +1343,9 @@ ShadowOAM: DS 160
 current: DS 1
 previous: DS 1
 PlayerLives: DS 1     
-RockSuspendedH: DS 1  ; 悬空石头地址高位
-RockSuspendedL: DS 1  ; 悬空石头地址低位
+RockSuspendedH: DS 1  
+RockSuspendedL: DS 1  
+CurrentLevel:   DS 1  
 ShadowTilemap: DS 1024       
 DirtyQueueCount: DS 1        
 DirtyQueueData: DS 64 * 3    
