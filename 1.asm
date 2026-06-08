@@ -1,3 +1,25 @@
+; Team Members :
+; 1) Yuhao Gong (999021488) 
+; 2) Xuanshuo Liang (800013328) 
+;
+; -----------------------------------------------------------------------------
+; Gameplay Rules
+; 1) Goal:
+;    - Collect all money on the current level (PRIZELEFT -> 0).
+; 2) Level flow:
+;    - Clear a level -> auto switch to next level.
+;    - Clear Level 10 -> show "YOU WIN!".
+; 3) Manual level switch (current keyboard mapping):
+;    - Press A key -> next level.
+;    - Press S key -> previous level.
+; 4) Lives:
+;    - New game starts with 9 lives.
+;    - Switching levels does not reset lives.
+; 5) Death:
+;    - If crushed by rock, lose 1 life and continue from checkpoint.
+;    - If lives reach 0, show "GAME OVER".
+; -----------------------------------------------------------------------------
+
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
@@ -15,7 +37,7 @@ DEF PLAY_Y_MAX    EQU SCR_H - (UI_ROWS * TILE_PX) - SPRITE_PX + OAM_Y_BIAS
 DEF PLAY_Y_MIN    EQU OAM_Y_BIAS
 
 DEF MAP_W         EQU 20
-DEF MAP_H         EQU 18
+DEF MAP_H         EQU 16
 DEF MAP_SIZE      EQU MAP_W * MAP_H
 DEF SCR_STRIDE    EQU 32  ; Tilemap 换行步长固定为 32
 
@@ -67,6 +89,7 @@ EntryPoint:
   ld a, 0
   ld [rLCDC], a
   
+TitleScreen:
   ; 游戏彻底开始时，初始化当前关卡为关卡 1 (索引为 0)
   xor a
   ld [CurrentLevel], a
@@ -109,7 +132,7 @@ EntryPoint:
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  call WaitActionKey
+  call WaitKey
   
 ; 初始化关卡
 InitLevelState:               ; 初始化关卡里的数据
@@ -152,6 +175,8 @@ InitLevelState:               ; 初始化关卡里的数据
   
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
+  
+  call WaitVBlank
 
 MainLoop:
   call UpdateInputs           ;识别玩家输入并移动玩家
@@ -188,7 +213,7 @@ LevelControl:
   inc a
   cp LEVEL_AMMOUNT       ; 检查是否超过总关卡数
   jr nz, .saveNext
-  xor a                  ; 如果超过，循环回第 1 关
+  dec a                  ; 如果超过，保持
 .saveNext:
   ld [CurrentLevel], a
   jp InitLevelState
@@ -202,7 +227,7 @@ LevelControl:
   dec a                  ; 不是第 1 关，正常减 1
   jr .savePrev
 .wrapToLast:
-  ld a, LEVEL_AMMOUNT - 1 ; 已经是第 1 关，循环跳到最后一关
+  ld a, 0                ; 已经是第 1 关，循环跳到最后一关
 .savePrev:
   ld [CurrentLevel], a
   jp InitLevelState
@@ -722,7 +747,7 @@ RockCheck:
   ld a, e                         ; 不需要理会高8位，因为除以32得到的余数只有后5位
   sub LOW(ShadowTilemap)          ; 因为当前de地址 = ShadowTilemap + Tile地址
   and 31                          ;and 00011111 = 保留后5位，得到余数
-  jr z, .SkipLeftSlide            ; 此时x+32，余数为0处于最左边界，直接去处理右侧滑落准备
+  jp z, .SkipLeftSlide            ; 此时x+32，余数为0处于最左边界，直接去处理右侧滑落准备
 
   dec hl                          ;x+31
   
@@ -743,6 +768,33 @@ RockCheck:
   cp TILE_WALL
   jr z, .CheckMoveLeft
   
+  ;检测玩家
+  push bc
+  ld b,h
+  ld c,l
+  
+  call CountPlayerTileAddress
+  ld a,h
+  cp b
+  jr nz,.Continue0
+  
+  ld a,l
+  cp c
+  jr nz,.Continue0
+  
+  ;是玩家，跳过
+  ld h,b
+  ld l,c
+  pop bc
+  jr .CheckMoveLeft
+  
+  ;没有玩家
+.Continue0
+  ld h,b
+  ld l,c
+  pop bc
+  ;
+  
 ;左边为空，检测左下边
   ld   a,l                                
   add  SCR_STRIDE 
@@ -750,6 +802,34 @@ RockCheck:
   ld   a, h
   adc  0               
   ld   h, a                       ;x-33
+  
+  
+  ;检测玩家
+  push bc
+  ld b,h
+  ld c,l
+  
+  call CountPlayerTileAddress
+  ld a,h
+  cp b
+  jr nz,.Continue
+  
+  ld a,l
+  cp c
+  jr nz,.Continue
+  
+  ;是玩家，跳过
+  ld h,b
+  ld l,c
+  pop bc
+  jr .ReturnHL
+  
+  ;没有玩家
+.Continue
+  ld h,b
+  ld l,c
+  pop bc
+  ;
   
   call CheckRockMove
   cp 1
@@ -792,6 +872,33 @@ RockCheck:
   cp TILE_WALL
   jr z, .RockSkip                 ;x+1
   
+  ;检测玩家
+  push bc
+  ld b,h
+  ld c,l
+  
+  call CountPlayerTileAddress
+  ld a,h
+  cp b
+  jr nz,.Continue1
+  
+  ld a,l
+  cp c
+  jr nz,.Continue1
+  
+  ;是玩家，跳过
+  ld h,b
+  ld l,c
+  pop bc
+  jr .RockSkip
+  
+  ;没有玩家
+.Continue1
+  ld h,b
+  ld l,c
+  pop bc
+  ;
+  
 ;检测右下边
   ld   a,l               
   add  SCR_STRIDE 
@@ -799,6 +906,33 @@ RockCheck:
   ld   a, h
   adc  0               
   ld   h, a                       ;x-31
+  
+  ;检测玩家
+  push bc
+  ld b,h
+  ld c,l
+  
+  call CountPlayerTileAddress
+  ld a,h
+  cp b
+  jr nz,.Continue3
+  
+  ld a,l
+  cp c
+  jr nz,.Continue3
+  
+  ;是玩家，跳过
+  ld h,b
+  ld l,c
+  pop bc
+  jr .ReturnHL
+  
+  ;没有玩家
+.Continue3
+  ld h,b
+  ld l,c
+  pop bc
+  ;
   
   call CheckRockMove
   cp 1
@@ -1091,7 +1225,7 @@ LoadLevel:
   ld bc, 1024 - (MAP_H * SCR_STRIDE)             ; bc = 1024 - 576 = 448 字节，即剩下的 14 行 × 32 列
   
 .fillRest:
-  ld a, TILE_EMPTY
+  ld a, TILE_UI
   ld [hl+], a
   dec bc
   ld a, b
@@ -1167,9 +1301,8 @@ TriggerYouWin:
   jr nz, .saveNext
   
 ;最后一关已完成,返回第一关
-  xor a
-  ld [CurrentLevel], a
-  jp InitLevelState
+  call WaitKey
+  jp EntryPoint
   
 ;进入下一关  
 .saveNext:
@@ -1300,8 +1433,6 @@ Level1Map:
   DB 0,0,0,4,0,0,0,0,0,0,0,0,0,4,1,0,0,0,0,0
   DB 0,0,0,4,4,4,4,4,0,0,0,4,4,4,1,4,4,4,3,0
   DB 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Level2Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
@@ -1320,8 +1451,6 @@ Level2Map:
   DB 4,0,0,0,0,4,4,4,0,4,4,4,4,0,0,4,0,0,0,4
   DB 4,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
   
 Level3Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
@@ -1340,8 +1469,6 @@ Level3Map:
   DB 4,0,0,0,0,0,4,0,0,4,0,4,0,0,4,0,0,0,0,4
   DB 4,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Level4Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
@@ -1360,8 +1487,6 @@ Level4Map:
   DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
   DB 4,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Level5Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
@@ -1380,8 +1505,6 @@ Level5Map:
   DB 4,5,0,0,0,4,1,0,0,0,0,0,4,0,0,0,0,0,1,4
   DB 4,0,0,1,0,0,4,0,0,0,1,0,4,0,0,0,0,0,0,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Level6Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
@@ -1400,8 +1523,6 @@ Level6Map:
   DB 4,0,4,0,5,0,5,0,5,0,5,0,5,0,5,0,5,0,0,4
   DB 4,1,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,1,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Level7Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
@@ -1420,8 +1541,6 @@ Level7Map:
   DB 4,0,0,0,0,0,4,0,0,0,0,0,4,0,0,0,0,0,0,4
   DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Level8Map:
   DB 6,0,1,0,3,0,0,4,0,0,0,4,0,0,3,0,1,0,0,0
@@ -1434,14 +1553,12 @@ Level8Map:
   DB 0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0
   DB 0,0,0,0,0,1,0,3,0,0,0,0,0,1,0,0,0,0,0,0
   DB 0,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,4,0
-  DB 0,0,0,0,1,1,0,0,4,2,4,0,0,1,1,0,0,0,0,0
+  DB 0,0,0,0,1,1,0,0,4,0,4,0,0,1,1,0,0,0,0,0
   DB 0,0,1,0,0,0,0,0,4,4,4,0,0,0,0,0,1,0,0,0
   DB 0,0,0,4,4,0,1,0,0,0,0,0,1,0,4,4,0,0,0,0
   DB 0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0
   DB 0,0,1,0,0,0,0,4,0,0,0,4,0,0,0,0,1,0,0,0
   DB 0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Level9Map:
   DB 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
@@ -1460,8 +1577,6 @@ Level9Map:
   DB 0,0,0,4,0,0,0,0,0,0,0,0,0,4,1,0,0,0,0,0
   DB 0,0,0,4,4,4,4,4,0,0,0,4,4,4,1,4,4,4,3,0
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 Level10Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
@@ -1480,8 +1595,6 @@ Level10Map:
   DB 4,0,0,0,0,4,4,4,0,4,4,4,4,0,0,4,0,0,0,4
   DB 4,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,4
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
 
 
