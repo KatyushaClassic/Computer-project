@@ -48,7 +48,6 @@ DEF TILE_WALL     EQU 4
 DEF TILE_EMPTY    EQU 5
 DEF TILE_START    EQU 6
 DEF TILE_UI       EQU 7
-DEF TILE_BARRIER  EQU 8 
 DEF PLAY_ROWS     EQU MAP_H - UI_ROWS
 
 CHARMAP " ", 7          ; 空格 → tile 7 (blank)
@@ -134,6 +133,17 @@ TitleScreen:
 
   call WaitKey
   
+.waitTitleKeyRelease:
+  call WaitVBlank
+  call readKeys
+  ld a, [previous]
+  or a
+  jr nz, .waitTitleKeyRelease
+
+  xor a
+  ld [current], a
+  ld [previous], a
+  
 ; 初始化关卡
 InitLevelState:               ; 初始化关卡里的数据
   call WaitVBlank
@@ -196,6 +206,8 @@ MainLoop:
 
 
 SECTION "Functions", ROM0
+
+
 
 ; 关卡快捷控制 (Start: 重置, A: 下一关, B: 上一关)
 LevelControl:
@@ -1054,6 +1066,11 @@ CheckPlayerDeath:
   ld h, a
   ld a, TILE_ROCK
   ld [hl], a
+  
+  ld a, h                ; 保护
+  ld [RockSuspendedH], a
+  ld a, l
+  ld [RockSuspendedL], a
 
 ; 扣减生命值并更新 UI
   ld a, [PlayerLives]
@@ -1103,7 +1120,7 @@ CheckPlayerDeath:
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  call WaitActionKey           
+  call WaitActionKey
 
 ; 返回地图：再次安全关闭屏幕
   call WaitVBlank
@@ -1156,8 +1173,8 @@ CheckPlayerDeath:
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-.halt:
-  jr .halt
+  call WaitKey
+  jp EntryPoint
 
 LoadLevel:
   call GetLevelMapAddress     
@@ -1266,49 +1283,45 @@ GetLevelMapAddress:
   ret
 
 TriggerYouWin:
+  ld a, [CurrentLevel]
+  inc a
+  cp LEVEL_AMMOUNT
+  jr z, ShowEndingScreen
+
+  ld [CurrentLevel], a
+  jp InitLevelState
+
+
+ShowEndingScreen:
   call WaitVBlank
   ld a, 0
   ld [rLCDC], a
 
   ld hl, TILEMAP0
   ld bc, 1024
-.clearVRAMWin:
-  ld a, TILE_EMPTY           
+.clearVRAMEnding:
+  ld a, TILE_EMPTY
   ld [hl+], a
   dec bc
   ld a, b
   or c
-  jr nz, .clearVRAMWin
+  jr nz, .clearVRAMEnding
 
-  ld hl, TILEMAP0 + 8 * 32 + 6  
+  ld hl, TILEMAP0 + 8 * 32 + 6
   ld de, YouWinStr
-  ld b, 7                       
-.drawWinText:
+  ld b, 7
+.drawEndingText:
   ld a, [de]
   inc de
   ld [hl+], a
   dec b
-  jr nz, .drawWinText
+  jr nz, .drawEndingText
 
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  call WaitActionKey           
-
-  ld a, [CurrentLevel]      ;进入下一关
-  inc a
-  cp LEVEL_AMMOUNT          ;看看有没有打到最后        
-  jr nz, .saveNext
-  
-;最后一关已完成,返回第一关
   call WaitKey
   jp EntryPoint
-  
-;进入下一关  
-.saveNext:
-  ld [CurrentLevel], a
-
-  jp InitLevelState
 
 ;Show Money
 UpdatePrizeDigit:
@@ -1615,7 +1628,7 @@ Tiles:
  DB %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
 ;7 = Blank
  DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
-;8 = Invisible Barrier 
+;8
  DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
 ; font characters
   DB $00,$3C,$66,$66,$66,$66,$3C,$00 ; 0
