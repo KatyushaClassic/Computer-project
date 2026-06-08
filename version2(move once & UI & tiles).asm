@@ -1,3 +1,7 @@
+; Team Members (Name - ID):
+; Yuhao Gong(999021488)
+; Xuanshuo Liang(800013328)
+;
 ; Input is edge-triggered: one move per discrete d-pad press.
 ; Playfield Y bounds reserve UI_ROWS at the bottom (player cannot enter UI rows).
 ; -----------------------------------------------------------------------------
@@ -5,11 +9,11 @@
 ; 1) Goal:
 ;    - Collect all money on the current level (PRIZELEFT -> 0).
 ; 2) Level flow:
-;    - Level 1 clear -> auto switch to Level 2.
-;    - Level 2 clear -> show "YOU WIN!".
+;    - Clear a level -> auto switch to next level.
+;    - Clear Level 10 -> show "YOU WIN!".
 ; 3) Manual level switch (current keyboard mapping):
-;    - Press A key -> next level.
-;    - Press S key -> previous level.
+;    - Press S key -> next level.
+;    - Press A key -> previous level.
 ;    - At Level 1, previous level returns to "PRESS ANY KEY" screen.
 ;    - At last level, next level shows "THIS IS LAST LEVEL".
 ; 4) Lives:
@@ -22,7 +26,7 @@
 INCLUDE "hardware.inc"
 
 DEF OBJCOUNT EQU 1
-DEF PLAYER_TILE_ID EQU 2
+DEF PLAYER_TILE_ID EQU 8
 
 ; Reserve the bottom 2 rows for UI (see PLAY_Y_MAX).
 DEF SCR_H       EQU 144
@@ -55,9 +59,10 @@ DEF LIFE_TEXT_ROW EQU LEVEL_H - 2
 DEF UI_TEXT_ROW EQU LEVEL_H - 1
 DEF LIFE_TENS_COL EQU 5
 DEF PRIZE_DIGIT_COL EQU 10
+DEF LEVEL_TENS_COL EQU 16
 DEF SCREEN_MODE_LEVEL EQU 0
 DEF SCREEN_MODE_OVERLAY EQU 1
-DEF LEVEL_COUNT EQU 2
+DEF LEVEL_COUNT EQU 10
 DEF START_LIVES EQU 9
 DEF KEY_A EQU %00000001
 DEF KEY_B EQU %00000010
@@ -107,7 +112,7 @@ SECTION "Header", ROM0[$100]
   ds $150 - @, 0
 
 EntryPoint:
-  call WaitVBlank
+  call WaitVBlank          ; WaitVBlank @L1389
   ld a, 0
   ld [rLCDC], a
 
@@ -116,29 +121,29 @@ EntryPoint:
   ld a,%11100100 ; Set high-contrast BG palette.
   ld [rBGP], a
 
-  call   CopyTilesToVRAM
+  call   CopyTilesToVRAM   ; CopyTilesToVRAM @L1411
   ld     hl, STARTOF(OAM)
-  call   ResetOAM
+  call   ResetOAM          ; ResetOAM @L1401
   ld     hl, ShadowOAM
-  call   ResetOAM
-  call   InitializeObjects
-  call ShowPressAnyKeyScreen
-  call StartNewGame
+  call   ResetOAM          ; ResetOAM @L1401
+  call   InitializeObjects ; InitializeObjects @L172
+  call ShowPressAnyKeyScreen ; ShowPressAnyKeyScreen @L1219
+  call StartNewGame        ; StartNewGame @L1272
 
 
 MainLoop:
   ; Frame order:
   ; 1) run game logic on WRAM, 2) wait VBlank, 3) render to VRAM/OAM.
-  call SaveCheckpointState
-  call UpdateInputs
-  call UpdateFallingRocks
-  call HandlePlayerDeath
-  call HandleWinCondition
-  call WaitVBlank
+  call SaveCheckpointState ; SaveCheckpointState @L928
+  call UpdateInputs        ; UpdateInputs @L211
+  call UpdateFallingRocks  ; UpdateFallingRocks @L827
+  call HandlePlayerDeath   ; HandlePlayerDeath @L982
+  call HandleWinCondition  ; HandleWinCondition @L1078
+  call WaitVBlank          ; WaitVBlank @L1389
   ld a,[screenMode]
   cp SCREEN_MODE_LEVEL
   jr nz,.skipRender
-  call RenderFrame
+  call RenderFrame         ; RenderFrame @L1281
 .skipRender:
   jp MainLoop
 
@@ -634,7 +639,9 @@ TryPushRockLeftAtPlayerTile:
   ld a,[hl]
   cp TILE_EMPTY
   jr nz,.fail
+  inc c                   ; Restore original rock position.
   push bc                 ; Save original rock position.
+  dec c                   ; Destination is one tile to the left.
   ld a,TILE_ROCK
   call SetMapTileBCA
   pop bc                  ; Restore original rock position.
@@ -676,7 +683,9 @@ TryPushRockRightAtPlayerTile:
   ld a,[hl]
   cp TILE_EMPTY
   jr nz,.fail
+  dec c                   ; Restore original rock position.
   push bc                 ; Save original rock position.
+  inc c                   ; Destination is one tile to the right.
   ld a,TILE_ROCK
   call SetMapTileBCA
   pop bc                  ; Restore original rock position.
@@ -809,6 +818,30 @@ UpdateLivesDigits:
   inc hl
   ld a, [livesLeft]
   add a, 9                  ; Convert 0..9 into tile IDs 9..18.
+  ld [hl],a
+  ret
+
+UpdateLevelDigits:
+  ld hl, TILEMAP0
+  ld bc, UI_TEXT_ROW * MAP_STRIDE + LEVEL_TENS_COL
+  add hl, bc
+  ld a, [currentLevel]
+  inc a
+  cp 10
+  jr nz, .singleDigit
+  ld a, 10                  ; Tile for digit "1".
+  ld [hl],a
+  inc hl
+  ld a, 9                   ; Tile for digit "0".
+  ld [hl],a
+  ret
+.singleDigit:
+  ld a, 7                   ; Blank tile.
+  ld [hl],a
+  inc hl
+  ld a, [currentLevel]
+  inc a
+  add a, 9                  ; Convert 1..9 into tile IDs 10..18.
   ld [hl],a
   ret
 
@@ -968,6 +1001,9 @@ RestoreCheckpointState:
   ld [ShadowOAM + 1], a
   ld a, [checkpointPrize]
   ld [prizeLeft], a
+  ; After continue, protect against immediate re-crush if a rock is right above.
+  call GetPlayerTilePos
+  call SetRockWaitIfRockAboveBC
   ret
 
 HandlePlayerDeath:
@@ -994,6 +1030,10 @@ HandlePlayerDeath:
   ld [screenMode], a
   call ContinuePromptScreen
   call RestoreCheckpointState
+  ; ContinuePromptScreen leaves LCD in BG-only mode.
+  ; Re-enable OBJ so the player sprite is visible again.
+  ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
+  ld [rLCDC], a
   ld a, SCREEN_MODE_LEVEL
   ld [screenMode], a
   ret
@@ -1115,6 +1155,7 @@ DrawPrizeUI:
   dec b
   jr nz, .copy
   call UpdatePrizeDigit
+  call UpdateLevelDigits
   ret
 
 DrawLivesUI:
@@ -1455,7 +1496,7 @@ LastLevelStr:
 .end
 
 PrizeUiLine:
-  DB "PRIZELEFT "
+  DB "PRIZELEFT    LV  "
 .end
 
 LifeUiLine:
@@ -1467,11 +1508,11 @@ DeadStr:
 .end
 
 ContinueStr1:
-  DB "PRESS SPACE"
+  DB "PRESS ANY KEY"
 .end
 
 ContinueStr2:
-  DB "TO CONTINUE"
+  DB "TO GO BACK"
 .end
 
 GameOverStr:
@@ -1490,11 +1531,11 @@ WinStr:
 Level1Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
   DB 4,6,5,0,0,1,5,3,5,4,5,3,5,1,0,0,5,5,5,4
-  DB 4,5,4,4,5,5,4,0,5,4,5,0,4,1,5,4,4,4,5,4
+  DB 4,5,4,4,5,5,4,0,5,4,5,0,4,1,5,4,2,4,5,4
   DB 4,5,5,4,5,0,4,0,3,4,3,0,4,0,5,4,5,5,5,4
-  DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,5,4,5,4
+  DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,2,4,5,4
   DB 4,0,5,5,5,5,5,4,1,1,1,4,5,5,5,5,5,4,5,4
-  DB 4,0,4,4,4,4,5,4,3,0,0,4,5,4,4,4,5,4,5,4
+  DB 4,0,4,4,4,4,5,4,3,0,0,4,5,4,2,4,5,4,5,4
   DB 4,0,5,3,5,4,5,5,5,0,5,5,5,4,5,3,5,5,5,4
   DB 4,0,5,4,5,4,4,4,5,0,5,4,4,4,5,4,4,4,5,4
   DB 4,0,5,4,5,5,5,4,5,0,5,4,5,5,5,4,5,5,5,4
@@ -1510,11 +1551,11 @@ Level1Map:
 Level2Map:
   DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
   DB 4,6,5,5,5,0,0,1,5,5,5,3,5,1,0,0,5,5,3,4
-  DB 4,5,4,4,5,5,4,0,5,4,5,0,4,1,5,4,4,4,5,4
+  DB 4,5,4,4,5,5,4,0,5,4,5,0,4,1,5,4,2,4,5,4
   DB 4,5,5,4,5,0,4,0,3,4,3,0,4,0,5,4,5,5,5,4
-  DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,5,4,5,4
+  DB 4,0,5,4,4,5,4,4,5,4,5,4,4,5,4,4,2,4,5,4
   DB 4,0,5,5,5,5,5,4,1,1,1,4,5,5,5,5,5,4,5,4
-  DB 4,0,4,4,4,4,5,4,3,0,0,4,5,4,4,4,5,4,5,4
+  DB 4,0,4,4,4,4,5,4,3,0,0,4,5,4,2,4,5,4,5,4
   DB 4,0,5,3,5,4,5,5,5,0,5,5,5,4,5,3,5,5,5,4
   DB 4,0,5,4,5,4,4,4,5,0,5,4,4,4,5,4,4,4,5,4
   DB 4,0,5,4,5,5,5,4,5,0,5,4,5,5,5,4,5,5,5,4
@@ -1527,8 +1568,169 @@ Level2Map:
   DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
   DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
 
+Level3Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0,0,0,4
+  DB 4,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,4
+  DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,0,0,4,4,4,0,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,0,4,0,3,0,4,0,0,0,0,0,0,4
+  DB 4,0,0,1,0,0,0,0,4,0,0,0,4,0,0,0,1,0,0,4
+  DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0,0,4
+  DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,4,4,0,4,4,4,0,4,4,0,0,0,0,4
+  DB 4,0,0,0,0,0,4,3,0,4,3,4,0,3,4,0,0,0,0,4
+  DB 4,0,0,0,0,0,4,0,0,4,0,4,0,0,4,0,0,0,0,4
+  DB 4,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level4Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,0,4,4,4,0,4,1,4,0,0,4,1,4,0,4,4,4,0,4
+  DB 4,0,4,3,4,0,0,0,0,0,0,0,0,0,0,4,3,4,0,4
+  DB 4,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,4
+  DB 4,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,4
+  DB 4,0,0,0,0,0,0,0,4,4,4,4,0,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,0,4,3,3,4,0,0,0,0,0,0,0,4
+  DB 4,0,0,1,0,0,0,0,4,0,0,4,0,0,0,0,1,0,0,4
+  DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level5Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,6,0,0,5,4,0,3,0,0,1,0,5,0,0,4,3,0,5,4
+  DB 4,5,4,0,0,4,1,0,4,0,0,0,4,0,3,4,0,0,0,4
+  DB 4,0,4,3,0,0,4,0,0,4,3,5,4,1,0,0,4,0,3,4
+  DB 4,0,0,4,0,1,4,0,3,4,0,0,0,4,0,3,0,4,0,4
+  DB 4,3,0,4,0,0,0,4,0,4,0,1,0,0,0,0,0,4,0,4
+  DB 4,0,0,0,4,0,0,4,0,0,0,0,0,0,4,1,0,0,0,4
+  DB 4,0,4,0,0,0,0,0,0,0,4,0,0,0,4,0,0,5,0,4
+  DB 4,0,4,0,0,0,4,1,0,0,4,0,0,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,4,0,1,4,0,0,5,0,4,0,1,0,4
+  DB 4,0,0,0,4,0,0,4,0,0,4,0,0,0,0,0,4,0,0,4
+  DB 4,0,1,0,4,0,5,0,4,0,0,4,1,0,0,0,4,0,0,4
+  DB 4,0,0,0,0,4,0,0,0,0,0,4,0,0,5,0,0,4,0,4
+  DB 4,5,0,0,0,4,1,0,0,0,0,0,4,0,0,0,0,0,1,4
+  DB 4,0,0,1,0,0,4,0,0,0,1,0,4,0,0,0,0,0,0,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level6Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,6,5,3,5,3,5,3,5,3,5,3,5,3,5,3,5,3,5,4
+  DB 4,1,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,0,4
+  DB 4,0,4,3,5,0,5,0,5,0,5,0,5,0,5,0,5,0,5,4
+  DB 4,1,4,0,4,4,4,1,1,1,1,1,4,4,4,4,4,4,0,4
+  DB 4,0,4,0,5,0,5,0,0,0,0,0,5,0,5,0,5,0,5,4
+  DB 4,1,4,4,4,4,0,0,0,0,0,0,0,4,4,4,4,4,1,4
+  DB 4,0,4,0,5,0,5,0,0,0,0,0,5,0,5,0,5,0,0,4
+  DB 4,1,4,4,4,4,0,0,0,0,0,0,0,4,4,4,4,4,1,4
+  DB 4,0,4,0,5,0,5,0,0,0,0,0,5,0,5,0,5,0,0,4
+  DB 4,1,4,4,4,4,4,0,4,4,4,0,4,4,4,4,4,4,5,4
+  DB 4,0,4,0,5,0,5,0,5,0,5,0,5,0,5,0,5,0,0,4
+  DB 4,1,4,4,4,4,4,0,4,4,4,0,4,4,4,4,4,4,5,4
+  DB 4,0,4,0,5,0,5,0,5,0,5,0,5,0,5,0,5,0,0,4
+  DB 4,1,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,1,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level7Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,0,0,0,3,1,4,0,0,0,0,0,4,0,3,0,0,0,0,4
+  DB 4,0,0,4,4,1,4,0,1,1,1,0,4,0,4,4,0,0,0,4
+  DB 4,0,0,4,3,0,0,0,0,0,0,0,0,0,3,4,0,0,0,4
+  DB 4,5,4,4,4,4,0,4,4,0,4,4,0,4,4,4,4,0,0,4
+  DB 4,0,0,0,0,0,4,3,5,3,4,0,0,0,0,0,1,0,0,4
+  DB 4,1,4,4,4,0,0,0,0,0,0,0,0,4,4,4,0,0,0,4
+  DB 4,0,0,0,0,0,0,0,1,6,1,0,0,0,0,0,0,0,0,4
+  DB 4,1,4,4,4,0,0,0,1,1,1,0,0,5,4,4,4,0,0,4
+  DB 4,0,0,0,1,0,0,4,3,0,3,4,0,0,0,0,0,1,0,4
+  DB 4,3,4,4,1,4,5,4,4,5,4,4,0,4,4,4,4,0,0,4
+  DB 4,0,0,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,4
+  DB 4,0,1,4,4,0,4,0,1,1,1,0,4,0,1,4,4,4,0,4
+  DB 4,0,0,0,0,0,4,0,0,0,0,0,4,0,0,0,0,0,0,4
+  DB 4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level8Map:
+  DB 6,0,1,0,3,0,0,4,0,0,0,4,0,0,3,0,1,0,0,0
+  DB 0,1,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,1,0,0
+  DB 0,0,0,4,4,0,1,0,1,1,1,0,1,0,4,4,0,0,0,0
+  DB 3,0,1,0,0,0,0,0,0,3,0,0,0,0,0,0,1,0,0,3
+  DB 0,0,0,0,1,1,0,0,4,0,4,0,0,1,1,0,0,0,0,0
+  DB 0,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,4,0
+  DB 0,0,0,0,0,1,0,3,0,0,0,3,0,1,0,0,0,0,0,0
+  DB 0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0
+  DB 0,0,0,0,0,1,0,3,0,0,0,0,0,1,0,0,0,0,0,0
+  DB 0,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,4,0
+  DB 0,0,0,0,1,1,0,0,4,2,4,0,0,1,1,0,0,0,0,0
+  DB 0,0,1,0,0,0,0,0,4,4,4,0,0,0,0,0,1,0,0,0
+  DB 0,0,0,4,4,0,1,0,0,0,0,0,1,0,4,4,0,0,0,0
+  DB 0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0
+  DB 0,0,1,0,0,0,0,4,0,0,0,4,0,0,0,0,1,0,0,0
+  DB 0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level9Map:
+  DB 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+  DB 0,6,0,0,0,1,0,3,0,4,0,3,0,1,0,0,0,0,0,0
+  DB 0,0,4,4,0,0,4,0,0,4,0,0,4,1,0,4,0,4,0,0
+  DB 0,0,0,4,0,0,4,0,3,4,3,0,4,0,0,4,0,0,0,0
+  DB 0,0,0,4,4,0,4,4,0,4,0,4,4,0,4,4,0,4,0,0
+  DB 0,0,0,0,0,0,0,4,1,1,1,4,0,0,0,0,0,4,0,0
+  DB 0,0,4,4,4,4,0,4,3,0,0,4,0,4,0,4,0,4,0,0
+  DB 0,0,0,3,0,4,0,0,0,0,0,0,0,4,0,3,0,0,0,0
+  DB 0,0,0,4,0,4,4,4,0,0,0,4,4,4,0,4,4,4,0,0
+  DB 0,0,0,4,0,0,0,4,0,0,0,4,0,0,0,4,0,0,0,0
+  DB 0,0,0,4,4,4,0,4,0,0,0,4,0,4,4,4,0,4,0,0
+  DB 0,0,0,0,0,4,0,4,0,0,0,4,0,4,3,0,0,4,0,0
+  DB 0,0,4,4,0,4,0,4,0,0,0,4,0,4,1,4,4,4,0,0
+  DB 0,0,0,4,0,0,0,0,0,0,0,0,0,4,1,0,0,0,0,0
+  DB 0,0,0,4,4,4,4,4,0,0,0,4,4,4,1,4,4,4,3,0
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
+Level10Map:
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 4,6,0,0,4,0,0,0,3,4,0,0,0,3,4,0,0,1,0,4
+  DB 4,0,0,0,4,0,1,0,0,4,0,1,0,0,4,0,0,0,0,4
+  DB 4,0,1,0,4,0,0,0,0,0,0,0,0,0,4,0,0,3,0,4
+  DB 4,0,0,0,4,4,4,0,4,4,4,0,4,4,4,0,0,0,0,4
+  DB 4,3,0,0,0,0,4,0,0,0,0,0,4,0,0,0,0,0,1,4
+  DB 4,0,0,0,0,0,4,0,1,0,3,0,4,0,1,0,0,0,0,4
+  DB 4,0,1,0,0,0,4,0,0,0,0,0,4,0,0,0,0,3,0,4
+  DB 4,0,0,0,0,0,4,4,4,0,4,4,4,0,0,0,1,0,0,4
+  DB 4,0,0,0,1,0,0,0,0,0,0,0,0,0,0,4,0,0,0,4
+  DB 4,4,4,0,0,0,4,0,0,0,1,0,4,0,0,4,0,0,0,4
+  DB 4,0,0,0,0,0,4,0,1,0,0,0,4,0,0,4,0,0,0,4
+  DB 4,0,1,0,0,0,0,0,0,0,0,0,4,0,0,4,0,1,0,4
+  DB 4,0,0,0,0,4,4,4,0,4,4,4,4,0,0,4,0,0,0,4
+  DB 4,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,4
+  DB 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+  DB 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+
 LevelMapPtrs:
-  DW Level1Map, Level2Map
+  DW Level1Map, Level2Map, Level3Map, Level4Map, Level5Map
+  DW Level6Map, Level7Map, Level8Map, Level9Map, Level10Map
 
 
 Tiles:
@@ -1604,8 +1806,8 @@ Tiles:
 
 ; 7 = Blank (CHARMAP)
 DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
-; 8
-DB %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
+; 8 = Player (smiley)
+DB %00111100,%01000010,%10100101,%10000001,%10100101,%10011001,%01000010,%00111100
 ; Digits and letters
  DB $00,$3C,$66,$66,$66,$66,$3C,$00 ; 0
  DB $00,$18,$38,$18,$18,$18,$3C,$00 ; 1
