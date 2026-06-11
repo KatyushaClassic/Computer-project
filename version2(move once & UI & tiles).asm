@@ -352,11 +352,14 @@ InitializeObjects:
 ; CopyShadowOAMtoOAM — copy OBJCOUNT sprites from ShadowOAM to hardware OAM
 ; -----------------------------------------------------------------------------
 CopyShadowOAMtoOAM:
-  ld hl, ShadowOAM
-  ld de, STARTOF(OAM)
-  ld b, OBJCOUNT
+  ld hl, ShadowOAM    ;12
+  ld de, STARTOF(OAM)   ;12
+  ld b, OBJCOUNT    8
 ; ----- Copy 4 bytes per sprite (Y, X, tile, attr) -----
 .loop:
+  ld a,[hl+]    ;8
+  ld [de],a   ;8
+  inc e   ;4
   ld a,[hl+]
   ld [de],a
   inc e
@@ -366,12 +369,9 @@ CopyShadowOAMtoOAM:
   ld a,[hl+]
   ld [de],a
   inc e
-  ld a,[hl+]
-  ld [de],a
-  inc e
-  dec b
-  jr nz, .loop
-  ret
+  dec b   ;4
+  jr nz, .loop    ;8
+  ret   ;16
 
 ; -----------------------------------------------------------------------------
 ; CopyShadowTilemapToVRAM — bulk copy 1024-byte ShadowTilemap to TILEMAP0
@@ -408,7 +408,7 @@ QueueTileUpdate:
   cp 64                      
   jr nc, .skipQueueAdd
   
-; convert ShadowTilemap ptr to VRAM addr: de = hl - ShadowTilemap + TILEMAP0
+; convert ShadowTilemap(WRAM) ptr to VRAM addr: de = hl - ShadowTilemap + TILEMAP0
 ; formula: VRAM addr = shadow addr - shadow base + VRAM base
 ; de = VRAM address, hl = ShadowTilemap address
   ld de, ShadowTilemap
@@ -456,31 +456,31 @@ QueueTileUpdate:
 ; ProcessDirtyQueue — flush all dirty queue entries to VRAM, then clear count
 ; -----------------------------------------------------------------------------
 ProcessDirtyQueue:
-  ld a, [DirtyQueueCount]
-  and a
-  ret z                      ; return if queue empty
+  ld a, [DirtyQueueCount]     ;16
+  and a                        ;4
+  ret z                      ; return if queue empty  20/8
   
 ; queue non-empty; use b as remaining entry count
-  ld b, a                    
-  ld hl, DirtyQueueData
+  ld b, a                    ;4
+  ld hl, DirtyQueueData       ;12
 .loop:
-  ld d, [hl]                 
-  inc hl
-  ld e, [hl]                 
-  inc hl
-  ld a, [hl]                 
-  inc hl
+  ld d, [hl]            ;8                
+  inc hl                ;8
+  ld e, [hl]           ;8      
+  inc hl                ;8
+  ld a, [hl]               ;8  
+  inc hl                ;8
  
 ; de = write address, a = tile value
-  ld [de], a                 
-  dec b
-  jr nz, .loop
+  ld [de], a                ;8 
+  dec b                   ;4
+  jr nz, .loop          ;12(N-1)+8
   
 ; after loop, reset count to zero
-  xor a
-  ld [DirtyQueueCount], a    
-  ret
-
+  xor a                 ;4
+  ld [DirtyQueueCount], a    ;16
+  ret           ;16
+;44+60N+12(N-1)+8+36=72N+76
 ; -----------------------------------------------------------------------------
 ; UpdateInputs — read keys and move player sprite in ShadowOAM
 ; Calls CheckMove for validation; left/right also attempt rock push
