@@ -354,7 +354,7 @@ InitializeObjects:
 CopyShadowOAMtoOAM:
   ld hl, ShadowOAM    ;12
   ld de, STARTOF(OAM)   ;12
-  ld b, OBJCOUNT    8
+  ld b, OBJCOUNT    ;8
 ; ----- Copy 4 bytes per sprite (Y, X, tile, attr) -----
 .loop:
   ld a,[hl+]    ;8
