@@ -88,7 +88,7 @@ SECTION "Header", ROM0[$100]
 ; Waits for VBlank then turns LCD off so VRAM/OAM writes do not tear
 ; -----------------------------------------------------------------------------
 EntryPoint:
-  call WaitVBlank             ; defined at L1444
+  call WaitVBlank           ; defined at L1237
   ld a, 0
   ld [rLCDC], a
 ; Safely disable LCD at entry so tile copy, OAM reset, and BG init can run without tearing
@@ -117,13 +117,13 @@ TitleScreen:
   ld a,%11100100 ; high-contrast background palette
   ld [rBGP], a
 
-  call   CopyTilesToVRAM      ; defined at L1467
+  call   CopyTilesToVRAM    ; defined at L1260
   ld     hl, STARTOF(OAM)
-  call   ResetOAM             ; defined at L1454
+  call   ResetOAM           ; defined at L1247
   ld     hl, ShadowOAM
-  call   ResetOAM             ; defined at L1454
-  call   InitializeObjects    ; defined at L336
-  call   ResetBG              ; defined at L320; clear ShadowTilemap
+  call   ResetOAM           ; defined at L1247
+  call   InitializeObjects  ; defined at L336
+  call   ResetBG            ; defined at L320 ; clear ShadowTilemap
   
   ; Draw title-screen text
   ld hl, ShadowTilemap        
@@ -141,11 +141,11 @@ TitleScreen:
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  call WaitKey                ; defined at L273
+  call WaitKey              ; defined at L273
   
 .waitTitleKeyRelease:
-  call WaitVBlank             ; defined at L1444
-  call readKeys               ; defined at L1489
+  call WaitVBlank           ; defined at L1237
+  call readKeys             ; defined at L1282
   ld a, [previous]
   or a
   jr nz, .waitTitleKeyRelease
@@ -159,10 +159,10 @@ TitleScreen:
 ; Load map, draw UI labels, count coins, refresh digits, enable LCD
 ; -----------------------------------------------------------------------------
 InitLevelState:
-  call WaitVBlank             ; defined at L1444
+  call WaitVBlank           ; defined at L1237
   ld a, 0
   ld [rLCDC], a
-  call   LoadLevel            ; defined at L1257; load map into ShadowTilemap
+  call   LoadLevel          ; defined at L1050 ; load map into ShadowTilemap
 
   ; Draw MONEY label
   ld hl, ShadowTilemap + 17 * 32 + 2
@@ -187,9 +187,9 @@ InitLevelState:
   jr nz, .drawHPStr
   
   ; Initialize level UI values (money/lives)
-  call CountMoneyInLevel       ; defined at L1336; count coins in current level
-  call UpdatePrizeDigit        ; defined at L1422; refresh prize digit
-  call UpdateHPDigit           ; defined at L1433; refresh HP digit
+  call CountMoneyInLevel    ; defined at L1129 ; count coins in current level
+  call UpdatePrizeDigit     ; defined at L1215 ; refresh prize digit
+  call UpdateHPDigit        ; defined at L1226 ; refresh HP digit
 
   call CopyShadowTilemapToVRAM ; defined at L379
   
@@ -199,7 +199,7 @@ InitLevelState:
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
   
-  call WaitVBlank             ; defined at L1444
+  call WaitVBlank           ; defined at L1237
 
 ; -----------------------------------------------------------------------------
 ; MainLoop — per-frame game update loop
@@ -207,20 +207,20 @@ InitLevelState:
 ; -----------------------------------------------------------------------------
 MainLoop:
 ; ----- Game logic phase -----
-  call UpdateInputs           ; defined at L489; handle input and move player
+  call UpdateInputs         ; defined at L489 ; handle input and move player
   
   ; each frame: if all coins collected, trigger win/level-advance flow
   ld a, [prizeLeft]
   and a
   jp z, TriggerYouWin
   
-  call RockCheck              ; defined at L780; update rock gravity
-  call CheckPlayerDeath       ; defined at L1124; check player death
-  call LevelControl           ; defined at L235
+  call RockCheck            ; defined at L779 ; update rock gravity
+  call CheckPlayerDeath     ; defined at L917 ; check player death
+  call LevelControl         ; defined at L235
 ; ----- Render phase (VBlank-safe VRAM/OAM writes) -----
-  call WaitVBlank             ; defined at L1444
-  call CopyShadowOAMtoOAM     ; defined at L354; update player sprite in OAM
-  call ProcessDirtyQueue      ; defined at L458; flush DirtyQueue to tilemap
+  call WaitVBlank           ; defined at L1237
+  call CopyShadowOAMtoOAM   ; defined at L354 ; update player sprite in OAM
+  call ProcessDirtyQueue    ; defined at L458 ; flush DirtyQueue to tilemap
   jp MainLoop
 
 
@@ -273,16 +273,16 @@ LevelControl:
 WaitKey:
 ; Phase 1: wait until no keys are held
 .waitRelease:
-  call WaitVBlank           
-  call readKeys
+  call WaitVBlank           ; defined at L1237
+  call readKeys             ; defined at L1282
   ld a, [previous]          
   or a
   jr nz, .waitRelease
 
 ; Phase 2: wait until any key is newly pressed
 .waitPress:
-  call WaitVBlank
-  call readKeys
+  call WaitVBlank           ; defined at L1237
+  call readKeys             ; defined at L1282
   ld a, [current]            
   or a
   jr z, .waitPress          
@@ -297,15 +297,15 @@ WaitKey:
 ; -----------------------------------------------------------------------------
 WaitActionKey:
 .waitReleaseAct:
-  call WaitVBlank           
-  call readKeys
+  call WaitVBlank           ; defined at L1237
+  call readKeys             ; defined at L1282
   ld a, [previous]          
   or a
   jr nz, .waitReleaseAct       
 
 .waitPressAct:
-  call WaitVBlank
-  call readKeys
+  call WaitVBlank           ; defined at L1237
+  call readKeys             ; defined at L1282
   ld a, [current]            
   and $0F                   ; mask direction keys; keep low 4 action-key bits
   jr z, .waitPressAct          
@@ -490,7 +490,7 @@ UpdateInputs:
   ld hl,ShadowOAM        ; HL -> player Y byte in ShadowOAM
   push hl
   
-  call readKeys
+  call readKeys             ; defined at L1282
   ; ----- Direction dispatch (newly pressed keys in C) -----
   ld a,c
   bit 5,a                ; Left
@@ -515,7 +515,7 @@ UpdateInputs:
   inc [hl]
 
   ld a,1             
-  call CheckMove
+  call CheckMove            ; defined at L677
   cp 1
   jp nz,.next             ; if move allowed, CheckMove already handled suspend state
   
@@ -541,14 +541,14 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   ld a,0
-  call CheckMove
+  call CheckMove            ; defined at L677
   cp 1
   jp nz,.next
   
 ; Rock push left: player tile must be rock with empty cell to the left
   ld d,h
   ld e,l
-  call CountPlayerTileAddress
+  call CountPlayerTileAddress ; defined at L875
   ld a, [hl]
   cp TILE_ROCK
   jr nz,.LeftCantMove
@@ -562,13 +562,13 @@ UpdateInputs:
 ; if empty, push rock into that cell
   ld a,TILE_ROCK
   ld [hl],a
-  call QueueTileUpdate
+  call QueueTileUpdate      ; defined at L400
 
 ; clear original rock cell
   inc hl
   ld a,TILE_EMPTY
   ld [hl],a
-  call QueueTileUpdate
+  call QueueTileUpdate      ; defined at L400
   
   jr .next
   
@@ -597,7 +597,7 @@ UpdateInputs:
   dec [hl]
   dec [hl]
   ld a,1
-  call CheckMove
+  call CheckMove            ; defined at L677
   cp 1
   jr nz,.next
   
@@ -623,14 +623,14 @@ UpdateInputs:
   inc [hl]
   inc [hl]
   ld a,0
-  call CheckMove
+  call CheckMove            ; defined at L677
   cp 1
   jr nz,.next
   
   ; push-rock-right check
   ld d,h
   ld e,l
-  call CountPlayerTileAddress
+  call CountPlayerTileAddress ; defined at L875
   ld a, [hl]
   cp TILE_ROCK
   jr nz,.RightCantMove
@@ -642,12 +642,12 @@ UpdateInputs:
   
   ld a,TILE_ROCK
   ld [hl],a
-  call QueueTileUpdate
+  call QueueTileUpdate      ; defined at L400
   
   dec hl
   ld a,TILE_EMPTY
   ld [hl],a
-  call QueueTileUpdate
+  call QueueTileUpdate      ; defined at L400
  
   jr .next
   
@@ -697,7 +697,7 @@ CheckMove:
   
 .Boundarydetectioncompleted
   ; ----- Target tile type check under player feet -----
-  call CountPlayerTileAddress
+  call CountPlayerTileAddress ; defined at L875
   ld a, [hl]
 
   cp TILE_EMPTY
@@ -752,12 +752,12 @@ CheckMove:
   dec a                    
   ld [prizeLeft], a
   push hl
-  call UpdatePrizeDigit   
+  call UpdatePrizeDigit     ; defined at L1215 ; refresh prize digit
   pop hl
 .notMoneyCollected:
   ld a, TILE_EMPTY
   ld [hl], a              
-  call QueueTileUpdate    
+  call QueueTileUpdate      ; defined at L400
   
   pop hl                  
   ld a, 0
@@ -807,7 +807,7 @@ RockCheck:
   adc  0                           ; handle carry
   ld   h, a                        ; HL = tile directly below rock
 
-  call CheckRockMove               ; can enter below? A=0 yes, A=1 no
+  call CheckRockMove        ; defined at L837; can enter below? A=0 yes, A=1 no
   cp 1
   jr z, .RockSkip                  ; blocked, leave rock in place
 
@@ -816,7 +816,7 @@ RockCheck:
   ld l,e
   ld a,TILE_EMPTY
   ld [hl],a
-  call QueueTileUpdate
+  call QueueTileUpdate      ; defined at L400
 
 ; ----- Continue scan: restore rock address, move to previous tile -----
 .RockSkip
@@ -857,7 +857,7 @@ CheckRockMove:
 .MoveAllowedAndChangeBG
   ld a, TILE_ROCK
   ld [hl],a                
-  call QueueTileUpdate    
+  call QueueTileUpdate      ; defined at L400
   pop hl
   pop de
   ld a, 0
@@ -915,7 +915,7 @@ CountPlayerTileAddress:
 ; Restores rock above player, sets RockSuspended, updates HP UI
 ; -----------------------------------------------------------------------------
 CheckPlayerDeath:
-  call CountPlayerTileAddress
+  call CountPlayerTileAddress ; defined at L875
 
   ld a, [hl]
   cp TILE_ROCK
@@ -943,7 +943,7 @@ CheckPlayerDeath:
   ld a, [PlayerLives]
   dec a
   ld [PlayerLives], a
-  call UpdateHPDigit
+  call UpdateHPDigit        ; defined at L1226 ; refresh HP digit
   
 ; check if lives reached zero
   ld a, [PlayerLives]
@@ -951,12 +951,12 @@ CheckPlayerDeath:
   jr z, .TriggerGameOver
 
   ; Lives remain: flush sprites/tiles then show death overlay
-  call WaitVBlank
-  call CopyShadowOAMtoOAM
-  call ProcessDirtyQueue
+  call WaitVBlank           ; defined at L1237
+  call CopyShadowOAMtoOAM   ; defined at L354 ; update player sprite in OAM
+  call ProcessDirtyQueue    ; defined at L458 ; flush DirtyQueue to tilemap
 
 ; ----- Death overlay: YOU ARE DEAD -----
-  call WaitVBlank
+  call WaitVBlank           ; defined at L1237
   ld a, 0
   ld [rLCDC], a
   
@@ -987,15 +987,15 @@ CheckPlayerDeath:
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  call WaitActionKey
+  call WaitActionKey        ; defined at L298
 
 ; before returning to map: disable LCD again
-  call WaitVBlank
+  call WaitVBlank           ; defined at L1237
   ld a, 0
   ld [rLCDC], a
 
 ; write restored ShadowTilemap (fixed rock + HP) back to VRAM
-  call CopyShadowTilemapToVRAM
+  call CopyShadowTilemapToVRAM ; defined at L379
   
 ; clear stale dirty queue from overlay phase
   xor a
@@ -1005,13 +1005,13 @@ CheckPlayerDeath:
   ld a, LCDC_ON | LCDC_OBJ_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
   
-  call WaitKey
+  call WaitKey              ; defined at L273
   
   ret
 
 ; ----- Game over: lives reached zero -----
 .TriggerGameOver:
-  call WaitVBlank
+  call WaitVBlank           ; defined at L1237
   ld a, 0
   ld [rLCDC], a
 
@@ -1040,7 +1040,7 @@ CheckPlayerDeath:
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  call WaitKey
+  call WaitKey              ; defined at L273
   jp EntryPoint
 
 ; -----------------------------------------------------------------------------
@@ -1048,7 +1048,7 @@ CheckPlayerDeath:
 ; Sets spawn from TILE_START, pads right/bottom with TILE_UI
 ; -----------------------------------------------------------------------------
 LoadLevel:
-  call GetLevelMapAddress
+  call GetLevelMapAddress   ; defined at L1151
   ld de, ShadowTilemap        ; DE = write cursor into ShadowTilemap
   xor a
   ld b, a                     ; B = row counter (0..MAP_H-1)
@@ -1127,7 +1127,7 @@ LoadLevel:
 ; CountMoneyInLevel — scan level ROM for TILE_MONEY, store count in prizeLeft
 ; -----------------------------------------------------------------------------
 CountMoneyInLevel:           
-  call GetLevelMapAddress     
+  call GetLevelMapAddress   ; defined at L1151
   ld bc, MAP_SIZE            
   ld d, 0
 .countLoop:
@@ -1178,7 +1178,7 @@ TriggerYouWin:
 ; ShowEndingScreen — clear VRAM, draw YOU WIN, wait for key, restart at EntryPoint
 ; -----------------------------------------------------------------------------
 ShowEndingScreen:
-  call WaitVBlank
+  call WaitVBlank           ; defined at L1237
   ld a, 0
   ld [rLCDC], a
 
@@ -1206,7 +1206,7 @@ ShowEndingScreen:
   ld a, LCDC_ON | LCDC_BG_ON | LCDC_BLOCK01
   ld [rLCDC], a
 
-  call WaitKey
+  call WaitKey              ; defined at L273
   jp EntryPoint               ; restart game from boot entry
 
 ; -----------------------------------------------------------------------------
@@ -1217,7 +1217,7 @@ UpdatePrizeDigit:
   add a, 9                      ; digit tile index: char '0' maps to tile 9
   ld hl, ShadowTilemap + 17 * 32 + 8 
   ld [hl], a
-  call QueueTileUpdate       
+  call QueueTileUpdate      ; defined at L400
   ret
 
 ; -----------------------------------------------------------------------------
@@ -1228,7 +1228,7 @@ UpdateHPDigit:
   add a, 9                    ; digit tile index: char '0' maps to tile 9
   ld hl, ShadowTilemap + 17 * 32 + 14 
   ld [hl], a
-  call QueueTileUpdate
+  call QueueTileUpdate      ; defined at L400
   ret
 
 ; -----------------------------------------------------------------------------
@@ -1599,9 +1599,9 @@ prizeLeft: DS 1
 ; Function call flow (with definition line numbers)
 ; 1) Boot flow
 ;    EntryPoint(L90)
-;      -> WaitVBlank(L1444)
-;      -> CopyTilesToVRAM(L1467)
-;      -> ResetOAM(L1454)
+;      -> WaitVBlank(L1237)
+;      -> CopyTilesToVRAM(L1260)
+;      -> ResetOAM(L1247)
 ;      -> InitializeObjects(L336)
 ;      -> ResetBG(L320)
 ;      -> CopyShadowTilemapToVRAM(L379)
@@ -1609,37 +1609,37 @@ prizeLeft: DS 1
 ;
 ; 2) Level init flow
 ;    InitLevelState(L161)
-;      -> WaitVBlank(L1444)
-;      -> LoadLevel(L1257)
-;      -> CountMoneyInLevel(L1336)
-;      -> UpdatePrizeDigit(L1422)
-;      -> UpdateHPDigit(L1433)
+;      -> WaitVBlank(L1237)
+;      -> LoadLevel(L1050)
+;      -> CountMoneyInLevel(L1129)
+;      -> UpdatePrizeDigit(L1215)
+;      -> UpdateHPDigit(L1226)
 ;      -> CopyShadowTilemapToVRAM(L379)
 ;
 ; 3) Main loop flow
 ;    MainLoop(L208)
 ;      -> UpdateInputs(L489)
-;          -> readKeys(L1489)
+;          -> readKeys(L1282)
 ;          -> CheckMove(L677)
-;              -> CountPlayerTileAddress(L1082)
-;              -> UpdatePrizeDigit(L1422) [on coin pickup]
+;              -> CountPlayerTileAddress(L875)
+;              -> UpdatePrizeDigit(L1215) [on coin pickup]
 ;              -> QueueTileUpdate(L400)
-;          -> CountPlayerTileAddress(L1082) [rock push check]
+;          -> CountPlayerTileAddress(L875) [rock push check]
 ;          -> QueueTileUpdate(L400) [enqueue map change]
-;      -> RockCheck(L780)
-;          -> CheckRockMove [vertical fall only]
+;      -> RockCheck(L779)
+;          -> CheckRockMove(L837) [vertical fall only]
 ;              -> QueueTileUpdate(L400)
-;      -> CheckPlayerDeath(L1124)
-;          -> CountPlayerTileAddress(L1082)
-;          -> UpdateHPDigit(L1433)
+;      -> CheckPlayerDeath(L917)
+;          -> CountPlayerTileAddress(L875)
+;          -> UpdateHPDigit(L1226)
 ;          -> WaitActionKey(L298) [death overlay]
 ;      -> LevelControl(L235)
-;      -> WaitVBlank(L1444)
+;      -> WaitVBlank(L1237)
 ;      -> CopyShadowOAMtoOAM(L354)
 ;      -> ProcessDirtyQueue(L458)
 ;
 ; 4) Win flow
-;    TriggerYouWin(L1374)
+;    TriggerYouWin(L1167)
 ;      -> InitLevelState(L161) [not final level]
-;      -> ShowEndingScreen(L1387) [final level]
+;      -> ShowEndingScreen(L1180) [final level]
 ;          -> WaitKey(L273)
